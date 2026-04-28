@@ -398,8 +398,8 @@ def test_from_config_per_novel_filters_file(tmp_path: Path):
     f.write_text(
         "# komentar\n"
         "\n"
-        "cleanup-this-line.*\n"
-        "another-pattern\s+oops\n",
+        r"cleanup-this-line.*" + "\n"
+        r"another-pattern\s+oops" + "\n",
         encoding="utf-8",
     )
     eng = filters.FilterEngine.from_config({}, custom_patterns_path=f)
