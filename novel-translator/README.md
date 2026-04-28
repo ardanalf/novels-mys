@@ -1,9 +1,15 @@
 # Novel Translator
 
-Script Python untuk menerjemahkan chapter novel (file `.txt`) dari **Bahasa Inggris**, **Jepang**, **Korea**, atau **Mandarin** ke **Bahasa Indonesia**. Mendukung **dua engine LLM**:
+Script Python untuk menerjemahkan chapter novel (file `.txt`) dari **Bahasa Inggris**, **Jepang**, **Korea**, atau **Mandarin** ke **Bahasa Indonesia**. Mendukung **tiga engine LLM**:
 
 - **Google Gemini** (free tier, default) — `gemini-2.5-flash`
-- **Runeria** (OpenAI-compatible gateway) — Claude Sonnet 4, DeepSeek 3.2, GLM-5, MiniMax, dst
+- **Runeria** (OpenAI-compatible gateway, https://runeria.fun) — `claude-sonnet-4`, `claude-haiku-4.5`
+- **Cline** (https://app.cline.bot) — `moonshotai/kimi-k2.6`, `minimax/minimax-m2.5`, `z-ai/glm-5`, dll
+
+**Tidak hafal command? Jalan tanpa argumen** → muncul menu interaktif yang nuntun kamu langkah-langkah:
+```bash
+python translate.py     # menu interaktif
+```
 
 Fitur utama:
 - 1 file `.txt` per chapter (in & out)
@@ -31,43 +37,83 @@ export GEMINI_API_KEY="paste_api_key_kamu_di_sini"
 
 # 2b. ATAU pakai Runeria
 export RUNERIA_API_KEY="paste_api_key_runeria"
-# lalu set engine: "runeria" di config.yaml, atau pakai --engine runeria di CLI
+
+# 2c. ATAU pakai Cline
+export CLINE_API_KEY="paste_api_key_cline"
 ```
 
 > **Tip:** Tambahkan baris `export ..._API_KEY=...` ke `~/.bashrc` atau `~/.zshrc` agar tidak perlu set ulang setiap kali buka terminal.
 >
-> Alternatif: isi `gemini.api_key` / `runeria.api_key` di `config.yaml`. Tapi env var lebih aman (jangan sampai key ke-commit).
+> Alternatif: isi `<engine>.api_key` di `config.yaml`. Tapi env var lebih aman (jangan sampai key ke-commit).
+
+### Menu interaktif (paling gampang)
+
+Kalau bingung dengan banyak command, jalanin saja:
+```bash
+python translate.py
+```
+Atau eksplisit:
+```bash
+python translate.py --menu
+```
+Muncul menu seperti ini:
+```
+======================================
+ Novel Translator — menu interaktif
+ engine=gemini  model=gemini-2.5-flash
+======================================
+  1. List semua novel & status
+  2. Translate novel
+  3. Edit glossary
+  4. Ganti engine & model
+  5. Build glossary saja (tanpa translate)
+  6. Dry-run filter (preview baris yang dihapus)
+  7. Cheatsheet command CLI
+  0. Keluar
+```
+Tiap pilihan nuntun kamu pilih novel, range chapter, dst tanpa harus hafal flag. Pilihan **4** bisa simpan engine+model permanen ke `config.yaml` (atau session-only).
+
+CLI tetap berfungsi penuh (untuk skrip/automation). Menu cuma layer di atasnya.
 
 ### Pilih engine LLM
 
 ```yaml
 # config.yaml
-engine: "gemini"     # default. Pilihan: "gemini" | "runeria"
+engine: "gemini"     # default. Pilihan: "gemini" | "runeria" | "cline"
 ```
 
 Atau override sekali pakai dari CLI:
 ```bash
 python translate.py --novel my_novel --engine runeria
+python translate.py --novel my_novel --engine cline
 ```
+
+Atau ganti via menu interaktif (pilihan 4) — bisa simpan permanen ke config.
 
 **Kapan pakai apa:**
 - **Gemini free tier** — gratis, 500 req/hari (`gemini-2.5-flash`). Bagus untuk volume besar.
-- **Runeria + claude-sonnet-4** — kualitas terbaik untuk dialog & POV halus, dipilih kalau Gemini quota habis atau hasilnya kurang nuanced.
+- **Runeria + claude-sonnet-4** — kualitas terbaik untuk dialog & POV halus, dipilih kalau Gemini quota habis.
+- **Cline + kimi-k2.6** — alternatif Asia-leaning, terutama untuk source CN/JP yang panjang.
 
-**Tier rekomendasi model Runeria** untuk terjemahan novel ID:
+**Model Runeria yang tersedia di plan basic:**
 
-| Tier | Model | Plan | Catatan |
-|------|-------|------|---------|
-| **S** | `claude-sonnet-4` | basic | TERBAIK. Naturally pilih "aku/kamu" tanpa dipaksa, konsisten di chapter panjang. **Default**. |
-| **A** | `deepseek-3.2` | **Pro** | TERBAIK untuk source CN/JP. **Butuh plan Pro/Enterprise** — tidak tersedia di basic plan. |
-| **B** | `glm-5` | basic | Solid CN→ID, mid-tier. |
-| **B** | `minimax-m2.5` | basic | Decent dialog CN. Prosa narasinya kurang natural dibanding S/A. |
-| **C** | `minimax-m2.1` | basic | Versi lama m2.5. |
-| **D** | `qwen3-coder-next` | basic | **Hindari** — coder model, output prosa-nya kering & kaku. |
+| Model | Catatan |
+|-------|---------|
+| `claude-sonnet-4` | TERBAIK. Naturally pilih "aku/kamu" tanpa dipaksa, konsisten di chapter panjang. **Default**. |
+| `claude-haiku-4.5` | Lebih cepat & murah dari sonnet, sedikit di bawah untuk dialog halus. Bagus untuk batch besar. |
 
-> **Catatan plan Runeria:** model Pro (mis. `deepseek-3.2`) bakal balas HTTP 403 `model_not_allowed` di plan basic. Script akan fail-fast (tidak retry sia-sia) dengan error jelas. Stick ke `claude-sonnet-4` di basic plan.
+Model lain (`deepseek-3.2`, `glm-5`, `minimax-m2.5`, dll) memerlukan plan **Pro/Enterprise** — basic plan akan dapat HTTP 403 `model_not_allowed`. Script fail-fast (tidak retry sia-sia).
 
-**Kalau Runeria balas HTTP 503** ("temporarily experiencing high load"), itu issue server Runeria sementara — script otomatis retry dengan exponential backoff (5→10→20→40→80 detik). Kalau habis 5 attempt masih 503, tunggu beberapa menit & ulang.
+**Model Cline yang direkomendasikan:**
+
+| Model | Catatan |
+|-------|---------|
+| `moonshotai/kimi-k2.6` | **Default**. Kimi kuat untuk source CN/JP & dialog panjang. |
+| `minimax/minimax-m2.5` | Decent dialog. |
+| `z-ai/glm-5` | Solid CN→ID, mid-tier. |
+| `kwaipilot/kat-coder-pro` | **Hindari** — coder model. |
+
+**Kalau provider balas HTTP 503** (server overload sementara), script otomatis retry dengan exponential backoff (5→10→20→40→80 detik). Kalau habis 5 attempt masih 503, tunggu beberapa menit & ulang.
 
 ---
 
