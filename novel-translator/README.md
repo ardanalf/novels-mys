@@ -165,9 +165,46 @@ isekai_hero                    source=  45  translated=   0  glossary=no
 
 ---
 
-## 4. Edit Glossary Manual
+## 4. Edit Glossary
 
-Kalau hasil auto-extract kurang pas, edit langsung file `novels/<nama>/glossary.json`:
+### A. Lewat CLI (rekomendasi — tanpa edit JSON manual)
+
+Glossary editor jalan **offline** — tidak butuh API key, tidak konsumsi quota.
+
+```bash
+# Lihat isi glossary
+python translate.py --novel my_novel --glossary-list
+
+# Tambah entry. Tipe: character | place | term
+python translate.py --novel my_novel --glossary-add character "Yukine" "Yukino"
+python translate.py --novel my_novel --glossary-add place     "Shibuya" "Distrik Shibuya"
+python translate.py --novel my_novel --glossary-add term      "Reiatsu" "Reiatsu"
+
+# Update entry yang sudah ada (overwrite target)
+python translate.py --novel my_novel --glossary-edit character "Yukine" "Yukino-chan"
+
+# Hapus entry
+python translate.py --novel my_novel --glossary-remove character "Yukine"
+
+# Set / hapus style notes
+python translate.py --novel my_novel --glossary-set-style "Pakai honorifik Jepang."
+python translate.py --novel my_novel --glossary-set-style ""
+```
+
+### B. Auto-update glossary saat translate chapter baru
+
+Set `glossary.auto_update_every: N` di `config.yaml` (default 20). Setiap N chapter berhasil diterjemahkan, script otomatis scan N chapter source terbaru untuk **nama/istilah baru** dan menambahkannya ke `glossary.json` secara non-destructive (entry yang sudah kamu edit manual **tidak ditimpa**).
+
+Berguna untuk novel panjang di mana karakter baru muncul jauh setelah chapter awal. Tiap auto-update memanggil Gemini sekali — kalau kuota ketat, set angkanya lebih besar (mis. 50) atau set 0 untuk disabled.
+
+```yaml
+glossary:
+  auto_update_every: 20  # 0 = disabled
+```
+
+### C. Edit Manual (tetap didukung)
+
+Kalau lebih nyaman edit JSON langsung di `novels/<nama>/glossary.json`:
 
 ```json
 {
@@ -207,6 +244,7 @@ Setelah edit, jalan lagi `python translate.py --novel my_novel` — glossary bar
 | `translation.max_chars_per_chunk` | `8000` | Pecah chapter kalau lebih panjang dari ini. |
 | `glossary.mode` | `auto` | `auto` / `manual` / `skip` |
 | `glossary.sample_chapters` | `3` | Berapa chapter awal untuk auto-extract. |
+| `glossary.auto_update_every` | `20` | Update glossary setiap N chapter selesai (nama baru di-merge ke `glossary.json` secara non-destructive). 0 = disabled. |
 | `filters.enabled` | `true` | Master toggle filter boilerplate. |
 | `filters.apply_pre_translation` | `true` | Filter source SEBELUM dikirim ke Gemini (hemat token). |
 | `filters.apply_post_translation` | `true` | Filter hasil terjemahan (pengaman lapis kedua). |

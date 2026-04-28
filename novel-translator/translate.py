@@ -163,16 +163,27 @@ class Glossary:
     def is_empty(self) -> bool:
         return not (self.characters or self.places or self.terms or self.style_notes)
 
-    def merge(self, other: "Glossary") -> None:
-        # Existing entries menang (jangan di-overwrite)
+    def merge(self, other: "Glossary") -> dict[str, int]:
+        """Merge other ke self. Existing entries menang (jangan di-overwrite).
+
+        Return dict berisi jumlah entry BARU yang ditambahkan per kategori.
+        """
+        added = {"characters": 0, "places": 0, "terms": 0}
         for k, v in other.characters.items():
-            self.characters.setdefault(k, v)
+            if k not in self.characters:
+                self.characters[k] = v
+                added["characters"] += 1
         for k, v in other.places.items():
-            self.places.setdefault(k, v)
+            if k not in self.places:
+                self.places[k] = v
+                added["places"] += 1
         for k, v in other.terms.items():
-            self.terms.setdefault(k, v)
+            if k not in self.terms:
+                self.terms[k] = v
+                added["terms"] += 1
         if not self.style_notes and other.style_notes:
             self.style_notes = other.style_notes
+        return added
 
     def format_for_prompt(self) -> str:
         if self.is_empty():
@@ -697,7 +708,11 @@ def cmd_translate(args: argparse.Namespace) -> int:
     if args.build_glossary or (gmode == "auto" and glossary.is_empty()):
         n = int(cfg["glossary"].get("sample_chapters", 3))
         new_g = extract_glossary_from_chapters(client, chapters, lang, n, logger)
-        glossary.merge(new_g)
+        added = glossary.merge(new_g)
+        logger.info(
+            "Glossary entry baru: +%d karakter, +%d tempat, +%d istilah",
+            added["characters"], added["places"], added["terms"],
+        )
         glossary.save(np.glossary_path)
         logger.info(
             "Glossary disimpan ke %s (%d karakter, %d tempat, %d istilah)",
@@ -720,6 +735,11 @@ def cmd_translate(args: argparse.Namespace) -> int:
 
     total = len(chapters)
     done = skipped = failed = 0
+
+    # Auto-update glossary tiap N chapter selesai diterjemahkan.
+    # 0 atau negatif = disabled.
+    auto_every = int(cfg["glossary"].get("auto_update_every", 0) or 0)
+    auto_buffer: list[Path] = []  # source chapter terbaru yang belum di-scan
 
     for idx, src_path in enumerate(chapters, 1):
         out_name = pattern.format(stem=src_path.stem)
@@ -797,8 +817,60 @@ def cmd_translate(args: argparse.Namespace) -> int:
         done += 1
         logger.info("%s — OK → %s", prefix, out_path.relative_to(ROOT))
 
+        # Auto-update glossary: setiap auto_every chapter berhasil, scan
+        # batch chapter source terbaru untuk nama/istilah baru, merge
+        # non-destructively.
+        if auto_every > 0:
+            auto_buffer.append(src_path)
+            if len(auto_buffer) >= auto_every:
+                _auto_update_glossary(
+                    client, glossary, auto_buffer, lang, np.glossary_path, logger,
+                )
+                auto_buffer.clear()
+
+    # Sisa buffer di akhir run: kalau ada >=1, scan supaya glossary up-to-date
+    # untuk run berikutnya.
+    if auto_every > 0 and auto_buffer:
+        _auto_update_glossary(
+            client, glossary, auto_buffer, lang, np.glossary_path, logger,
+        )
+
     logger.info("Selesai. done=%d skipped=%d failed=%d", done, skipped, failed)
     return 0 if failed == 0 else 2
+
+
+def _auto_update_glossary(
+    client: GeminiClient,
+    glossary: Glossary,
+    chapters: list[Path],
+    lang: str,
+    glossary_path: Path,
+    logger: logging.Logger,
+) -> None:
+    """Scan chapter terbaru untuk entry glossary baru, merge & save.
+
+    Existing entry tidak di-overwrite (lihat Glossary.merge). Hanya entry
+    yang benar-benar BARU yang di-tambahkan ke glossary.json.
+    """
+    logger.info("Auto-update glossary: scan %d chapter terbaru …", len(chapters))
+    try:
+        new_g = extract_glossary_from_chapters(
+            client, chapters, lang, len(chapters), logger,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Auto-update glossary GAGAL (lanjut tanpa update): %s", e)
+        return
+
+    added = glossary.merge(new_g)
+    total_new = added["characters"] + added["places"] + added["terms"]
+    if total_new > 0:
+        glossary.save(glossary_path)
+        logger.info(
+            "Auto-update glossary: +%d karakter, +%d tempat, +%d istilah baru → disimpan",
+            added["characters"], added["places"], added["terms"],
+        )
+    else:
+        logger.info("Auto-update glossary: tidak ada entry baru.")
 
 
 def build_argparser() -> argparse.ArgumentParser:
@@ -824,8 +896,157 @@ def build_argparser() -> argparse.ArgumentParser:
                    help="Tampilkan baris source yang AKAN dihapus filter (tanpa menerjemahkan)")
     p.add_argument("--list", action="store_true", help="Daftar novel yang terdeteksi & statusnya")
 
+    # ----- Glossary editor (offline, tidak butuh API key) -----
+    g = p.add_argument_group(
+        "Glossary editor",
+        "Kelola glossary.json per-novel tanpa edit JSON manual. Tipe valid: "
+        "character, place, term.",
+    )
+    g.add_argument(
+        "--glossary-list", action="store_true",
+        help="Tampilkan isi glossary novel terkait.",
+    )
+    g.add_argument(
+        "--glossary-add", nargs=3, metavar=("TYPE", "SOURCE", "TARGET"),
+        help="Tambah entry. Contoh: --glossary-add character Yukine Yukino",
+    )
+    g.add_argument(
+        "--glossary-edit", nargs=3, metavar=("TYPE", "SOURCE", "NEW_TARGET"),
+        help="Update entry yang sudah ada (overwrite target).",
+    )
+    g.add_argument(
+        "--glossary-remove", nargs=2, metavar=("TYPE", "SOURCE"),
+        help="Hapus entry. Contoh: --glossary-remove character Yukine",
+    )
+    g.add_argument(
+        "--glossary-set-style", metavar="NOTES",
+        help="Set style_notes (string kosong untuk hapus).",
+    )
+
     sub.add_parser("list", help="alias untuk --list")
     return p
+
+
+GLOSSARY_TYPES = {"character": "characters", "place": "places", "term": "terms"}
+
+
+def cmd_glossary(args: argparse.Namespace) -> int:
+    """Glossary editor offline. Tidak menyentuh API.
+
+    Return 0 kalau ada operasi yang dijalankan, atau caller harus fallback
+    ke cmd_translate kalau tidak ada flag glossary yang aktif.
+    """
+    np = NovelPaths.from_name(args.novel)
+    np.ensure()
+    glossary = Glossary.load(np.glossary_path)
+
+    def _rel(p: Path) -> str:
+        """Tampilkan path relatif ke ROOT kalau bisa, kalau tidak absolute."""
+        try:
+            return str(p.relative_to(ROOT))
+        except ValueError:
+            return str(p)
+
+    def _resolve_type(t: str) -> str:
+        t = t.lower().strip()
+        if t in GLOSSARY_TYPES:
+            return GLOSSARY_TYPES[t]
+        # plural sebagai alias
+        if t in GLOSSARY_TYPES.values():
+            return t
+        raise ValueError(
+            f"Tipe '{t}' tidak valid. Pilih: character, place, term."
+        )
+
+    changed = False
+
+    if args.glossary_list:
+        if glossary.is_empty():
+            print(f"({_rel(np.glossary_path)} kosong / belum ada)")
+        else:
+            print(f"# Glossary: {_rel(np.glossary_path)}\n")
+            for kind, label in (
+                ("characters", "Karakter"),
+                ("places", "Tempat"),
+                ("terms", "Istilah"),
+            ):
+                d = getattr(glossary, kind)
+                if d:
+                    print(f"[{label}] ({len(d)} entry)")
+                    for src, tgt in d.items():
+                        print(f"  {src!r:30s} -> {tgt!r}")
+                    print()
+            if glossary.style_notes:
+                print(f"[Style notes]\n  {glossary.style_notes}")
+        return 0
+
+    if args.glossary_add:
+        type_, src, tgt = args.glossary_add
+        kind = _resolve_type(type_)
+        d = getattr(glossary, kind)
+        if src in d:
+            print(
+                f"ERROR: '{src}' sudah ada di {kind} (→ {d[src]!r}). "
+                f"Pakai --glossary-edit untuk update.",
+                file=sys.stderr,
+            )
+            return 1
+        d[src] = tgt
+        changed = True
+        print(f"Added {kind}: {src!r} -> {tgt!r}")
+
+    if args.glossary_edit:
+        type_, src, new_tgt = args.glossary_edit
+        kind = _resolve_type(type_)
+        d = getattr(glossary, kind)
+        if src not in d:
+            print(
+                f"ERROR: '{src}' tidak ada di {kind}. "
+                f"Pakai --glossary-add untuk tambah baru.",
+                file=sys.stderr,
+            )
+            return 1
+        old = d[src]
+        d[src] = new_tgt
+        changed = True
+        print(f"Edited {kind}: {src!r}: {old!r} -> {new_tgt!r}")
+
+    if args.glossary_remove:
+        type_, src = args.glossary_remove
+        kind = _resolve_type(type_)
+        d = getattr(glossary, kind)
+        if src not in d:
+            print(
+                f"ERROR: '{src}' tidak ada di {kind}.",
+                file=sys.stderr,
+            )
+            return 1
+        old = d.pop(src)
+        changed = True
+        print(f"Removed {kind}: {src!r} (was → {old!r})")
+
+    if args.glossary_set_style is not None:
+        glossary.style_notes = args.glossary_set_style
+        changed = True
+        if args.glossary_set_style:
+            print(f"Style notes diset: {args.glossary_set_style!r}")
+        else:
+            print("Style notes dihapus.")
+
+    if changed:
+        glossary.save(np.glossary_path)
+        print(f"Saved → {_rel(np.glossary_path)}")
+    return 0
+
+
+def _has_glossary_flags(args: argparse.Namespace) -> bool:
+    return bool(
+        getattr(args, "glossary_list", False)
+        or getattr(args, "glossary_add", None)
+        or getattr(args, "glossary_edit", None)
+        or getattr(args, "glossary_remove", None)
+        or getattr(args, "glossary_set_style", None) is not None
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -837,6 +1058,9 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: --novel <nama> wajib diisi (atau pakai --list).", file=sys.stderr)
         return 1
     try:
+        # Glossary editor (offline, tidak butuh API key) di-handle duluan.
+        if _has_glossary_flags(args):
+            return cmd_glossary(args)
         return cmd_translate(args)
     except (RuntimeError, FileNotFoundError, ValueError) as e:
         print(f"ERROR: {e}", file=sys.stderr)

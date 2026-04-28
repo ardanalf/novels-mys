@@ -1,6 +1,7 @@
 """Smoke tests for translate.py (offline, tanpa Gemini)."""
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -258,6 +259,200 @@ def test_dry_run_filter_does_not_trigger_glossary_auto_build():
     # Dan GeminiClient (yang di-init sebelum auto-build di kode buggy) juga
     # tidak boleh dipanggil.
     assert result["gemini_client_called"] is False
+
+
+# ----------------------------------------------------------------------
+# Glossary
+# ----------------------------------------------------------------------
+
+def test_glossary_merge_returns_added_count():
+    g = translate.Glossary(characters={"Akira": "Akira"})
+    other = translate.Glossary(
+        characters={"Akira": "Akira-san", "Yuki": "Yuki"},  # Akira sudah ada
+        places={"Tokyo": "Tokyo"},
+        terms={"Reiatsu": "Reiatsu", "Bankai": "Bankai"},
+    )
+    added = g.merge(other)
+    # Akira tidak dihitung (sudah ada), Yuki dihitung baru
+    assert added == {"characters": 1, "places": 1, "terms": 2}
+    # Existing entry tidak ditimpa
+    assert g.characters["Akira"] == "Akira"
+    # New entry ditambahkan
+    assert g.characters["Yuki"] == "Yuki"
+    assert g.places["Tokyo"] == "Tokyo"
+
+
+def test_glossary_merge_no_overwrite_when_target_differs():
+    g = translate.Glossary(characters={"Akira": "Akira"})
+    other = translate.Glossary(characters={"Akira": "Akira-DIFFERENT"})
+    added = g.merge(other)
+    assert added["characters"] == 0
+    assert g.characters["Akira"] == "Akira"
+
+
+# ----------------------------------------------------------------------
+# Glossary editor CLI (offline)
+# ----------------------------------------------------------------------
+
+def _glossary_sandbox(novel_subdir: str):
+    """Buat sandbox NOVELS_DIR untuk test glossary CLI."""
+    import os
+    import tempfile
+    tmpdir = Path(tempfile.mkdtemp(prefix="glossary_"))
+    orig_novels_dir = translate.NOVELS_DIR
+    orig_api_key = os.environ.pop("GEMINI_API_KEY", None)
+    translate.NOVELS_DIR = tmpdir
+
+    def cleanup():
+        import shutil
+        translate.NOVELS_DIR = orig_novels_dir
+        if orig_api_key is not None:
+            os.environ["GEMINI_API_KEY"] = orig_api_key
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    return tmpdir, cleanup
+
+
+def test_glossary_add_creates_entry():
+    tmpdir, cleanup = _glossary_sandbox("test_add")
+    try:
+        rc = translate.main([
+            "--novel", "test_add",
+            "--glossary-add", "character", "Yukine", "Yukino",
+        ])
+        assert rc == 0
+        gpath = tmpdir / "test_add" / "glossary.json"
+        assert gpath.exists()
+        data = json.loads(gpath.read_text(encoding="utf-8"))
+        assert data["characters"] == {"Yukine": "Yukino"}
+    finally:
+        cleanup()
+
+
+def test_glossary_add_rejects_duplicate():
+    tmpdir, cleanup = _glossary_sandbox("test_dup")
+    try:
+        rc1 = translate.main([
+            "--novel", "test_dup",
+            "--glossary-add", "character", "Akira", "Akira",
+        ])
+        assert rc1 == 0
+        rc2 = translate.main([
+            "--novel", "test_dup",
+            "--glossary-add", "character", "Akira", "Different",
+        ])
+        # Duplicate harus ERROR (return 1) supaya user tahu pakai --glossary-edit.
+        assert rc2 == 1
+        # Value asli tidak berubah
+        gpath = tmpdir / "test_dup" / "glossary.json"
+        data = json.loads(gpath.read_text(encoding="utf-8"))
+        assert data["characters"]["Akira"] == "Akira"
+    finally:
+        cleanup()
+
+
+def test_glossary_edit_overwrites_target():
+    tmpdir, cleanup = _glossary_sandbox("test_edit")
+    try:
+        translate.main(["--novel", "test_edit", "--glossary-add", "character", "Akira", "Akira"])
+        rc = translate.main([
+            "--novel", "test_edit",
+            "--glossary-edit", "character", "Akira", "Akira-chan",
+        ])
+        assert rc == 0
+        gpath = tmpdir / "test_edit" / "glossary.json"
+        data = json.loads(gpath.read_text(encoding="utf-8"))
+        assert data["characters"]["Akira"] == "Akira-chan"
+    finally:
+        cleanup()
+
+
+def test_glossary_edit_rejects_missing_entry():
+    tmpdir, cleanup = _glossary_sandbox("test_edit_missing")
+    try:
+        rc = translate.main([
+            "--novel", "test_edit_missing",
+            "--glossary-edit", "character", "Nonexistent", "X",
+        ])
+        # Edit non-existent harus error
+        assert rc == 1
+    finally:
+        cleanup()
+
+
+def test_glossary_remove_deletes_entry():
+    tmpdir, cleanup = _glossary_sandbox("test_remove")
+    try:
+        translate.main(["--novel", "test_remove", "--glossary-add", "place", "Tokyo", "Tokyo"])
+        translate.main(["--novel", "test_remove", "--glossary-add", "place", "Kyoto", "Kyoto"])
+        rc = translate.main([
+            "--novel", "test_remove",
+            "--glossary-remove", "place", "Tokyo",
+        ])
+        assert rc == 0
+        gpath = tmpdir / "test_remove" / "glossary.json"
+        data = json.loads(gpath.read_text(encoding="utf-8"))
+        assert "Tokyo" not in data["places"]
+        assert data["places"]["Kyoto"] == "Kyoto"
+    finally:
+        cleanup()
+
+
+def test_glossary_set_style_writes_notes():
+    tmpdir, cleanup = _glossary_sandbox("test_style")
+    try:
+        rc = translate.main([
+            "--novel", "test_style",
+            "--glossary-set-style", "Pakai honorifik Jepang.",
+        ])
+        assert rc == 0
+        gpath = tmpdir / "test_style" / "glossary.json"
+        data = json.loads(gpath.read_text(encoding="utf-8"))
+        assert data["style_notes"] == "Pakai honorifik Jepang."
+    finally:
+        cleanup()
+
+
+def test_glossary_invalid_type_rejected():
+    tmpdir, cleanup = _glossary_sandbox("test_invalid_type")
+    try:
+        # Tipe 'monster' tidak valid
+        rc = translate.main([
+            "--novel", "test_invalid_type",
+            "--glossary-add", "monster", "Goblin", "Goblin",
+        ])
+        # ValueError ditangkap di main() jadi return 1
+        assert rc == 1
+    finally:
+        cleanup()
+
+
+def test_glossary_list_does_not_require_api_key():
+    """Glossary editor harus offline — tidak boleh init GeminiClient."""
+    tmpdir, cleanup = _glossary_sandbox("test_list_offline")
+    try:
+        # GEMINI_API_KEY sudah di-pop oleh sandbox.
+        rc = translate.main(["--novel", "test_list_offline", "--glossary-list"])
+        # Harus 0 walaupun tidak ada API key (glossary kosong/tidak ada).
+        assert rc == 0
+    finally:
+        cleanup()
+
+
+def test_glossary_type_aliases_plural_works():
+    """Tipe plural ('characters') juga harus diterima sebagai alias."""
+    tmpdir, cleanup = _glossary_sandbox("test_alias")
+    try:
+        rc = translate.main([
+            "--novel", "test_alias",
+            "--glossary-add", "characters", "Yukine", "Yukino",
+        ])
+        assert rc == 0
+        gpath = tmpdir / "test_alias" / "glossary.json"
+        data = json.loads(gpath.read_text(encoding="utf-8"))
+        assert data["characters"] == {"Yukine": "Yukino"}
+    finally:
+        cleanup()
 
 
 if __name__ == "__main__":
