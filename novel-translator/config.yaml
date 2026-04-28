@@ -93,6 +93,20 @@ glossary:
   # Berapa chapter awal yang dipakai untuk ekstrak glossary
   sample_chapters: 3
 
+  # Auto-update glossary: setiap N chapter yang berhasil diterjemahkan,
+  # script akan scan N chapter source terbaru untuk nama/istilah BARU dan
+  # menambahkannya ke glossary.json secara non-destructive (entry lama
+  # tidak ditimpa). Berguna untuk novel panjang di mana karakter & tempat
+  # baru muncul jauh setelah chapter awal.
+  #
+  #   0 atau negatif = disabled
+  #   20             = update setiap 20 chapter (default)
+  #
+  # Catatan: tiap auto-update memanggil Gemini sekali, jadi kalau RPM/quota
+  # ketat, set angkanya lebih besar (mis. 50) atau set 0 dan jalan manual
+  # lewat --build-glossary kalau merasa perlu.
+  auto_update_every: 20
+
 output:
   # Pola nama file output. Variabel: {stem} = nama file source tanpa ekstensi
   filename_pattern: "{stem}.txt"
