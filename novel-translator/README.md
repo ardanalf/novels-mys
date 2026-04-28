@@ -11,6 +11,7 @@ Fitur utama:
 - **Rate limiting + retry** untuk free tier (10 RPM)
 - **Tanpa sensor** (safety_settings BLOCK_NONE) — aman untuk konten 18+
 - **Default kasual `aku/kamu`** untuk dialog & POV-1, dengan post-processing opsional untuk membersihkan sisa `Anda/Saya`
+- **Filter boilerplate otomatis** — hapus kredit translator, link Patreon/Discord, navigasi prev/next, watermark, residu HTML, dll sebelum dikirim ke Gemini (hemat token + output bersih)
 - Style: natural Bahasa Indonesia tanpa mengubah struktur kalimat/paragraf
 
 ---
@@ -44,6 +45,7 @@ novel-translator/
 │   ├── translate_kr.txt
 │   ├── translate_cn.txt
 │   └── extract_glossary.txt
+├── filters.py                   ← modul filter boilerplate
 ├── novels/
 │   └── <nama_novel>/
 │       ├── source/             ← KAMU letakkan chapter .txt asli di sini
@@ -52,6 +54,7 @@ novel-translator/
 │       │   └── ...
 │       ├── translated/         ← hasil terjemahan otomatis muncul di sini
 │       ├── glossary.json       ← glossary novel ini (auto-generate / edit manual)
+│       ├── filters.txt         ← (opsional) regex filter custom per-novel
 │       └── .progress           ← state (jangan diubah manual)
 └── logs/<nama_novel>.log
 ```
@@ -130,6 +133,30 @@ python translate.py --novel my_novel --only 5 --rebuild  # rebuild chapter 5 saj
 python translate.py --list
 ```
 
+### G. Preview apa saja yang akan dihapus filter (tanpa terjemahkan)
+
+```bash
+python translate.py --novel my_novel --dry-run-filter
+```
+
+Output contoh:
+```
+[Chapter_001.txt] 11 baris akan dihapus:
+  L3    [credits]    Translated by Lucky7 | Edited by Owl
+  L4    [credits]    Source: lightnovelpub.com
+  L5    [credits]    Read advanced chapters at patreon.com/lucky7
+  L6    [social]     Join our Discord at discord.gg/lucky7
+  L8    [navigation] << Previous | Index | Next >>
+  L18   [ads]        If you enjoyed this chapter, please leave a comment.
+  L20   [novelupdates] Vote this novel on NovelUpdates if you like it!
+  L22   [navigation] —————
+  L24   [navigation] To be continued...
+  L26   [footer]     © 2024 Lucky7 Translations. All rights reserved.
+  L27   [footer]     Do not repost without permission.
+```
+
+Kalau ada baris yang **harusnya tidak dihapus** (false positive) atau ada boilerplate khusus situsmu yang tidak tertangkap, sesuaikan `filters.*` di `config.yaml` atau buat `novels/<nama>/filters.txt`.
+
 Output contoh:
 ```
 my_novel                       source= 120  translated=  87  glossary=yes
@@ -180,6 +207,11 @@ Setelah edit, jalan lagi `python translate.py --novel my_novel` — glossary bar
 | `translation.max_chars_per_chunk` | `8000` | Pecah chapter kalau lebih panjang dari ini. |
 | `glossary.mode` | `auto` | `auto` / `manual` / `skip` |
 | `glossary.sample_chapters` | `3` | Berapa chapter awal untuk auto-extract. |
+| `filters.enabled` | `true` | Master toggle filter boilerplate. |
+| `filters.apply_pre_translation` | `true` | Filter source SEBELUM dikirim ke Gemini (hemat token). |
+| `filters.apply_post_translation` | `true` | Filter hasil terjemahan (pengaman lapis kedua). |
+| `filters.categories.<nama>` | `true` (kecuali `tl_notes` = `false`) | Toggle per-kategori. Lihat detail di `config.yaml`. |
+| `filters.custom_patterns` | `[]` | Regex tambahan global (case-insensitive, anchor ke seluruh baris). |
 | `post_process.normalize_pronouns` | `false` | Aktifkan pembersih `Anda/Saya` → `kamu/aku` setelah Gemini menerjemahkan. |
 | `post_process.normalize_pronouns_strength` | `safe` | `safe` (skip paragraf yang mengandung penanda formal seperti "Yang Mulia", "Tuan ", "Shifu", dll) atau `aggressive` (ganti semua tanpa kecuali). |
 
@@ -234,6 +266,25 @@ Ini adalah problem klasik karena Gemini bias ke bentuk formal. Ada dua pendekata
 
 **Mau ubah style ke "lo/gue" atau gaya webnovel**
 Edit file `prompts/translate_<lang>.txt` di bagian "KATA GANTI ORANG". Tiap bahasa punya prompt sendiri (`translate_en.txt`, `translate_jp.txt`, `translate_kr.txt`, `translate_cn.txt`).
+
+**Hasil masih ada baris kredit translator / link Patreon / Discord / dll yang ikut diterjemahkan**
+Filter boilerplate sudah aktif default (kategori `credits`, `donate`, `social`, `navigation`, `ads`, `schedule`, `html_residue`, `footer`, `whitespace`, `novelupdates`). Kalau site sumbermu punya boilerplate spesifik yang tidak tertangkap:
+
+1. Lihat dulu apa yang AKAN dihapus pakai `--dry-run-filter`:
+   ```bash
+   python translate.py --novel my_novel --dry-run-filter
+   ```
+   Ini hanya menampilkan baris yang match filter, tanpa menerjemahkan apa pun.
+2. Tambahkan regex custom di salah satu tempat:
+   - **Untuk semua novel**: `config.yaml` → `filters.custom_patterns` (list regex).
+   - **Per-novel**: buat file `novels/<nama_novel>/filters.txt`, satu regex per baris (komentar `#` & blank line OK). Contoh:
+     ```
+     # Hapus baris kredit khusus situs aku
+     ^translated\s+by\s+ardanalf\b.*
+     ^https?://ardanalfino\.my\.id/.*
+     ```
+3. Mau matikan kategori tertentu? Set `false` di `config.yaml` → `filters.categories.<nama>`.
+4. Mau matikan filter total? `filters.enabled: false`.
 
 ---
 
