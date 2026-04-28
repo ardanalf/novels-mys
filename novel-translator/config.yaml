@@ -6,6 +6,13 @@
 # Dapatkan API key gratis di: https://aistudio.google.com/apikey
 # ===================================================================
 
+# LLM provider yang dipakai. Pilihan: "gemini" | "runeria"
+#   - gemini  : Google Gemini (free tier 500 req/hari untuk flash, butuh GEMINI_API_KEY)
+#   - runeria : OpenAI-compatible gateway (https://runeria.fun/v1), butuh RUNERIA_API_KEY
+#
+# Bisa di-override sekali pakai dari CLI: --engine runeria
+engine: "gemini"
+
 gemini:
   # Kosongkan kalau pakai env var GEMINI_API_KEY (rekomendasi)
   api_key: ""
@@ -27,6 +34,43 @@ gemini:
   requests_per_minute: 8  # diset sedikit di bawah limit biar aman
   max_retries: 5
   retry_base_delay: 5     # detik, exponential backoff
+
+# -------------------------------------------------------------------
+# Runeria (OpenAI-compatible gateway). Aktifkan dengan engine: "runeria"
+# di atas, atau dari CLI: --engine runeria.
+#
+# Model yang direkomendasikan untuk terjemahan novel ID (urut dari terbaik):
+#   - claude-sonnet-4    : TERBAIK. Nuansa dialog & POV halus, naturally
+#                          pilih "aku/kamu" untuk kasual, konsisten antar
+#                          chapter panjang. (default)
+#   - deepseek-3.2       : Runner-up & TERBAIK untuk source CN/JP karena
+#                          dilatih banyak data Asia. Bagus juga sebagai
+#                          fallback kalau claude habis.
+#   - glm-5              : Solid untuk CN→ID, kualitas mid-tier.
+#   - minimax-m2.5       : Decent untuk dialog CN, prosa narasinya kurang
+#                          natural dibanding claude/deepseek.
+#   - minimax-m2.1       : Versi lama dari m2.5, agak lebih kaku.
+#   - qwen3-coder-next   : JANGAN dipakai untuk terjemahan novel — model
+#                          ini di-tune untuk kode, output prosa-nya kering.
+#
+# Endpoint: <base_url>/chat/completions (OpenAI format).
+# -------------------------------------------------------------------
+runeria:
+  # Kosongkan kalau pakai env var RUNERIA_API_KEY (rekomendasi)
+  api_key: ""
+
+  base_url: "https://runeria.fun/v1"
+  model: "claude-sonnet-4"
+  glossary_model: "claude-sonnet-4"
+
+  temperature: 0.3
+  max_output_tokens: 16384
+
+  # Rate limit (sesuaikan dengan plan Runeria-mu)
+  requests_per_minute: 30
+  max_retries: 5
+  retry_base_delay: 5
+  timeout_seconds: 120
 
 translation:
   target_language: "Indonesian"

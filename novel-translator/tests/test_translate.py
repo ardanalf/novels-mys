@@ -1,9 +1,13 @@
 """Smoke tests for translate.py (offline, tanpa Gemini)."""
 from __future__ import annotations
 
+import io
 import json
+import logging
+import os
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 # Allow `import translate` ketika dijalankan dari root atau tests/
 ROOT = Path(__file__).resolve().parent.parent
@@ -453,6 +457,184 @@ def test_glossary_type_aliases_plural_works():
         assert data["characters"] == {"Yukine": "Yukino"}
     finally:
         cleanup()
+
+
+# ----------------------------------------------------------------------
+# Engine selector & RuneriaClient
+# ----------------------------------------------------------------------
+
+def _silent_logger() -> logging.Logger:
+    lg = logging.getLogger("test")
+    lg.handlers.clear()
+    lg.addHandler(logging.NullHandler())
+    return lg
+
+
+def test_engine_unknown_raises():
+    cfg = {"engine": "totallyfake"}
+    try:
+        translate.create_llm_client(cfg, _silent_logger())
+    except ValueError as e:
+        assert "totallyfake" in str(e)
+        return
+    raise AssertionError("Expected ValueError untuk engine tidak dikenal")
+
+
+def test_engine_runeria_factory_picks_runeria():
+    cfg = {"engine": "runeria", "runeria": {"api_key": "fake-key-for-test"}}
+    client = translate.create_llm_client(cfg, _silent_logger())
+    assert isinstance(client, translate.RuneriaClient)
+    assert client.translate_model_name == "claude-sonnet-4"
+
+
+def test_engine_runeria_requires_api_key():
+    """Tanpa api_key di config & tanpa env var, harus error jelas."""
+    cfg = {"engine": "runeria", "runeria": {"api_key": ""}}
+    orig = os.environ.pop("RUNERIA_API_KEY", None)
+    try:
+        try:
+            translate.create_llm_client(cfg, _silent_logger())
+        except RuntimeError as e:
+            assert "RUNERIA_API_KEY" in str(e)
+            return
+        raise AssertionError("Expected RuntimeError tanpa API key")
+    finally:
+        if orig is not None:
+            os.environ["RUNERIA_API_KEY"] = orig
+
+
+def test_engine_cli_override_beats_config():
+    """--engine runeria override engine: gemini di config."""
+    cfg = {"engine": "gemini", "runeria": {"api_key": "fake"}}
+    client = translate.create_llm_client(cfg, _silent_logger(), engine_override="runeria")
+    assert isinstance(client, translate.RuneriaClient)
+
+
+def test_runeria_generate_parses_openai_response():
+    """Mock urlopen, pastikan generate() return content dari choices[0].message.content."""
+    cfg = {"engine": "runeria", "runeria": {
+        "api_key": "fake", "requests_per_minute": 0,
+    }}
+    client = translate.create_llm_client(cfg, _silent_logger())
+
+    captured = {}
+
+    class _FakeResp:
+        def __init__(self, payload: dict):
+            self._buf = json.dumps(payload).encode("utf-8")
+        def read(self): return self._buf
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["headers"] = dict(req.header_items())
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp({
+            "choices": [{
+                "message": {"content": "Halo dunia."},
+                "finish_reason": "stop",
+            }],
+        })
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        out = client.generate("Translate: Hello world.")
+    assert out == "Halo dunia."
+    # Pastikan payload OpenAI-compatible
+    assert captured["url"].endswith("/chat/completions")
+    assert captured["body"]["model"] == "claude-sonnet-4"
+    assert captured["body"]["messages"][0]["role"] == "user"
+    assert captured["body"]["messages"][0]["content"] == "Translate: Hello world."
+    # Auth header (case-insensitive lookup)
+    auth = next(v for k, v in captured["headers"].items() if k.lower() == "authorization")
+    assert auth == "Bearer fake"
+
+
+def test_runeria_generate_uses_glossary_model_when_specified():
+    cfg = {"engine": "runeria", "runeria": {
+        "api_key": "fake", "requests_per_minute": 0,
+        "model": "deepseek-3.2", "glossary_model": "claude-sonnet-4",
+    }}
+    client = translate.create_llm_client(cfg, _silent_logger())
+
+    seen_models = []
+
+    class _FakeResp:
+        def __init__(self, payload):
+            self._buf = json.dumps(payload).encode("utf-8")
+        def read(self): return self._buf
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=None):
+        body = json.loads(req.data.decode("utf-8"))
+        seen_models.append(body["model"])
+        return _FakeResp({"choices": [{"message": {"content": "ok"}}]})
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        client.generate("hello")
+        client.generate("hello", model_name=client.glossary_model_name)
+
+    assert seen_models == ["deepseek-3.2", "claude-sonnet-4"]
+
+
+def test_runeria_empty_response_triggers_retry_and_fail():
+    """Response kosong = error, harus retry sampai max_retries lalu fail."""
+    cfg = {"engine": "runeria", "runeria": {
+        "api_key": "fake", "requests_per_minute": 0,
+        "max_retries": 2, "retry_base_delay": 0,
+    }}
+    client = translate.create_llm_client(cfg, _silent_logger())
+
+    class _FakeResp:
+        def read(self): return b'{"choices":[{"message":{"content":""},"finish_reason":"stop"}]}'
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=None):
+        return _FakeResp()
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        try:
+            client.generate("hello")
+        except RuntimeError as e:
+            assert "gagal" in str(e).lower()
+            return
+    raise AssertionError("Expected RuntimeError untuk response kosong")
+
+
+def test_runeria_429_is_retried():
+    """HTTP 429 harus retry, dan kalau berhasil di percobaan kedua, return ok."""
+    import urllib.error
+
+    cfg = {"engine": "runeria", "runeria": {
+        "api_key": "fake", "requests_per_minute": 0,
+        "max_retries": 3, "retry_base_delay": 0,
+    }}
+    client = translate.create_llm_client(cfg, _silent_logger())
+
+    calls = {"n": 0}
+
+    class _FakeResp:
+        def __init__(self, payload):
+            self._buf = json.dumps(payload).encode("utf-8")
+        def read(self): return self._buf
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.HTTPError(
+                req.full_url, 429, "Too Many Requests",
+                {}, io.BytesIO(b'{"error":"rate limit"}'),
+            )
+        return _FakeResp({"choices": [{"message": {"content": "ok lagi"}}]})
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        out = client.generate("hello")
+    assert out == "ok lagi"
+    assert calls["n"] == 2
 
 
 if __name__ == "__main__":
