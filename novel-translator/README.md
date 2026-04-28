@@ -1,10 +1,14 @@
 # Novel Translator
 
-Script Python untuk menerjemahkan chapter novel (file `.txt`) dari **Bahasa Inggris**, **Jepang**, **Korea**, atau **Mandarin** ke **Bahasa Indonesia** menggunakan **Google Gemini (free tier)**.
+Script Python untuk menerjemahkan chapter novel (file `.txt`) dari **Bahasa Inggris**, **Jepang**, **Korea**, atau **Mandarin** ke **Bahasa Indonesia**. Mendukung **dua engine LLM**:
+
+- **Google Gemini** (free tier, default) — `gemini-2.5-flash`
+- **Runeria** (OpenAI-compatible gateway) — Claude Sonnet 4, DeepSeek 3.2, GLM-5, MiniMax, dst
 
 Fitur utama:
 - 1 file `.txt` per chapter (in & out)
 - Auto-detect bahasa sumber: **EN / JP / KR / CN**
+- **Multi-engine**: ganti antar provider via `engine:` di config.yaml atau `--engine` CLI
 - **Glossary per-novel** (auto-extract pakai LLM, sekali setup) → nama karakter & istilah konsisten antar chapter
 - **Resume** otomatis: chapter yang sudah selesai di-skip, yang gagal bisa diulang
 - **Chunking otomatis** untuk chapter panjang
@@ -22,13 +26,44 @@ Fitur utama:
 # 1. Pasang dependency
 pip install -r requirements.txt
 
-# 2. Set API key Gemini (gratis di https://aistudio.google.com/apikey)
+# 2a. Pakai Gemini (default — gratis di https://aistudio.google.com/apikey)
 export GEMINI_API_KEY="paste_api_key_kamu_di_sini"
+
+# 2b. ATAU pakai Runeria
+export RUNERIA_API_KEY="paste_api_key_runeria"
+# lalu set engine: "runeria" di config.yaml, atau pakai --engine runeria di CLI
 ```
 
-> **Tip:** Tambahkan baris `export GEMINI_API_KEY=...` ke `~/.bashrc` atau `~/.zshrc` agar tidak perlu set ulang setiap kali buka terminal.
+> **Tip:** Tambahkan baris `export ..._API_KEY=...` ke `~/.bashrc` atau `~/.zshrc` agar tidak perlu set ulang setiap kali buka terminal.
 >
-> Alternatif: isi `gemini.api_key` di `config.yaml`. Tapi env var lebih aman (jangan sampai key ke-commit).
+> Alternatif: isi `gemini.api_key` / `runeria.api_key` di `config.yaml`. Tapi env var lebih aman (jangan sampai key ke-commit).
+
+### Pilih engine LLM
+
+```yaml
+# config.yaml
+engine: "gemini"     # default. Pilihan: "gemini" | "runeria"
+```
+
+Atau override sekali pakai dari CLI:
+```bash
+python translate.py --novel my_novel --engine runeria
+```
+
+**Kapan pakai apa:**
+- **Gemini free tier** — gratis, 500 req/hari (`gemini-2.5-flash`). Bagus untuk volume besar.
+- **Runeria + claude-sonnet-4** — kualitas terbaik untuk dialog & POV halus, dipilih kalau Gemini quota habis atau hasilnya kurang nuanced.
+
+**Tier rekomendasi model Runeria** untuk terjemahan novel ID:
+
+| Tier | Model | Catatan |
+|------|-------|---------|
+| **S** | `claude-sonnet-4` | TERBAIK. Naturally pilih "aku/kamu" tanpa dipaksa, konsisten di chapter panjang. **Default**. |
+| **A** | `deepseek-3.2` | TERBAIK untuk source CN/JP karena dilatih banyak data Asia. Fallback bagus kalau claude habis. |
+| **B** | `glm-5` | Solid CN→ID, mid-tier. |
+| **B** | `minimax-m2.5` | Decent dialog CN. Prosa narasinya kurang natural dibanding S/A. |
+| **C** | `minimax-m2.1` | Versi lama m2.5. |
+| **D** | `qwen3-coder-next` | **Hindari** — coder model, output prosa-nya kering & kaku. |
 
 ---
 
