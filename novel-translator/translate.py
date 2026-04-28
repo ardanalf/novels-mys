@@ -433,6 +433,21 @@ class RuneriaClient(LLMClient):
                 except Exception:
                     body_text = ""
                 snippet = body_text[:300]
+                # Fail-fast untuk error 4xx yang permanen (tidak akan pernah
+                # berhasil meskipun di-retry): 400 bad request, 401 auth, 403
+                # forbidden (mis. model butuh plan Pro), 404 model tidak ada.
+                # Pengecualian: 408 (request timeout) & 429 (rate limit) tetap
+                # di-retry. Selain itu (5xx, network), retry dengan backoff.
+                is_retryable_4xx = e.code in (408, 429)
+                is_permanent = 400 <= e.code < 500 and not is_retryable_4xx
+                if is_permanent:
+                    self.logger.error(
+                        "Runeria GAGAL (HTTP %d, permanen — tidak di-retry): %s",
+                        e.code, snippet,
+                    )
+                    raise RuntimeError(
+                        f"Runeria HTTP {e.code} (permanen): {snippet}"
+                    ) from e
                 is_quota = e.code == 429 or "quota" in body_text.lower() or "rate" in body_text.lower()
                 delay = self.retry_base * (2 ** (attempt - 1))
                 if is_quota:

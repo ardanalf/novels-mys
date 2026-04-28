@@ -56,14 +56,18 @@ python translate.py --novel my_novel --engine runeria
 
 **Tier rekomendasi model Runeria** untuk terjemahan novel ID:
 
-| Tier | Model | Catatan |
-|------|-------|---------|
-| **S** | `claude-sonnet-4` | TERBAIK. Naturally pilih "aku/kamu" tanpa dipaksa, konsisten di chapter panjang. **Default**. |
-| **A** | `deepseek-3.2` | TERBAIK untuk source CN/JP karena dilatih banyak data Asia. Fallback bagus kalau claude habis. |
-| **B** | `glm-5` | Solid CN→ID, mid-tier. |
-| **B** | `minimax-m2.5` | Decent dialog CN. Prosa narasinya kurang natural dibanding S/A. |
-| **C** | `minimax-m2.1` | Versi lama m2.5. |
-| **D** | `qwen3-coder-next` | **Hindari** — coder model, output prosa-nya kering & kaku. |
+| Tier | Model | Plan | Catatan |
+|------|-------|------|---------|
+| **S** | `claude-sonnet-4` | basic | TERBAIK. Naturally pilih "aku/kamu" tanpa dipaksa, konsisten di chapter panjang. **Default**. |
+| **A** | `deepseek-3.2` | **Pro** | TERBAIK untuk source CN/JP. **Butuh plan Pro/Enterprise** — tidak tersedia di basic plan. |
+| **B** | `glm-5` | basic | Solid CN→ID, mid-tier. |
+| **B** | `minimax-m2.5` | basic | Decent dialog CN. Prosa narasinya kurang natural dibanding S/A. |
+| **C** | `minimax-m2.1` | basic | Versi lama m2.5. |
+| **D** | `qwen3-coder-next` | basic | **Hindari** — coder model, output prosa-nya kering & kaku. |
+
+> **Catatan plan Runeria:** model Pro (mis. `deepseek-3.2`) bakal balas HTTP 403 `model_not_allowed` di plan basic. Script akan fail-fast (tidak retry sia-sia) dengan error jelas. Stick ke `claude-sonnet-4` di basic plan.
+
+**Kalau Runeria balas HTTP 503** ("temporarily experiencing high load"), itu issue server Runeria sementara — script otomatis retry dengan exponential backoff (5→10→20→40→80 detik). Kalau habis 5 attempt masih 503, tunggu beberapa menit & ulang.
 
 ---
 

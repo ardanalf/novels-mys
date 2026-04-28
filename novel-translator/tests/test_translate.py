@@ -603,6 +603,100 @@ def test_runeria_empty_response_triggers_retry_and_fail():
     raise AssertionError("Expected RuntimeError untuk response kosong")
 
 
+def test_runeria_403_fails_fast_no_retry():
+    """HTTP 403 (mis. model butuh plan Pro) harus fail-fast tanpa retry sia-sia."""
+    import urllib.error
+
+    cfg = {"engine": "runeria", "runeria": {
+        "api_key": "fake", "requests_per_minute": 0,
+        "max_retries": 5, "retry_base_delay": 0,
+    }}
+    client = translate.create_llm_client(cfg, _silent_logger())
+
+    calls = {"n": 0}
+    body_403 = (
+        b'{"error":{"message":"Model requires Pro plan",'
+        b'"code":"model_not_allowed"}}'
+    )
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(
+            req.full_url, 403, "Forbidden", {}, io.BytesIO(body_403),
+        )
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        try:
+            client.generate("hello")
+        except RuntimeError as e:
+            # Pesan harus mention 403 dan body, supaya user paham
+            assert "403" in str(e)
+            assert "Pro plan" in str(e) or "model_not_allowed" in str(e)
+        else:
+            raise AssertionError("Expected RuntimeError pada 403")
+
+    # Tidak boleh retry — cuma 1 call walaupun max_retries=5
+    assert calls["n"] == 1, f"403 jangan di-retry, tapi terjadi {calls['n']} call"
+
+
+def test_runeria_400_fails_fast_no_retry():
+    """HTTP 400 (bad request, mis. payload salah) juga harus fail-fast."""
+    import urllib.error
+
+    cfg = {"engine": "runeria", "runeria": {
+        "api_key": "fake", "requests_per_minute": 0,
+        "max_retries": 5, "retry_base_delay": 0,
+    }}
+    client = translate.create_llm_client(cfg, _silent_logger())
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(
+            req.full_url, 400, "Bad Request", {}, io.BytesIO(b'{"error":"x"}'),
+        )
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        try:
+            client.generate("hello")
+        except RuntimeError:
+            pass
+    assert calls["n"] == 1
+
+
+def test_runeria_503_is_retried():
+    """HTTP 503 (server overload) harus di-retry — sementara, bukan permanen."""
+    import urllib.error
+
+    cfg = {"engine": "runeria", "runeria": {
+        "api_key": "fake", "requests_per_minute": 0,
+        "max_retries": 3, "retry_base_delay": 0,
+    }}
+    client = translate.create_llm_client(cfg, _silent_logger())
+    calls = {"n": 0}
+
+    class _FakeResp:
+        def __init__(self, payload):
+            self._buf = json.dumps(payload).encode("utf-8")
+        def read(self): return self._buf
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.HTTPError(
+                req.full_url, 503, "Service Unavailable", {},
+                io.BytesIO(b'{"error":"high load"}'),
+            )
+        return _FakeResp({"choices": [{"message": {"content": "ok lagi"}}]})
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        out = client.generate("hello")
+    assert out == "ok lagi"
+    assert calls["n"] == 2
+
+
 def test_runeria_429_is_retried():
     """HTTP 429 harus retry, dan kalau berhasil di percobaan kedua, return ok."""
     import urllib.error

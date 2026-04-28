@@ -40,18 +40,19 @@ gemini:
 # di atas, atau dari CLI: --engine runeria.
 #
 # Model yang direkomendasikan untuk terjemahan novel ID (urut dari terbaik):
-#   - claude-sonnet-4    : TERBAIK. Nuansa dialog & POV halus, naturally
-#                          pilih "aku/kamu" untuk kasual, konsisten antar
-#                          chapter panjang. (default)
-#   - deepseek-3.2       : Runner-up & TERBAIK untuk source CN/JP karena
-#                          dilatih banyak data Asia. Bagus juga sebagai
-#                          fallback kalau claude habis.
-#   - glm-5              : Solid untuk CN→ID, kualitas mid-tier.
-#   - minimax-m2.5       : Decent untuk dialog CN, prosa narasinya kurang
-#                          natural dibanding claude/deepseek.
-#   - minimax-m2.1       : Versi lama dari m2.5, agak lebih kaku.
-#   - qwen3-coder-next   : JANGAN dipakai untuk terjemahan novel — model
-#                          ini di-tune untuk kode, output prosa-nya kering.
+#   - claude-sonnet-4    : [basic] TERBAIK. Nuansa dialog & POV halus,
+#                          naturally pilih "aku/kamu" untuk kasual,
+#                          konsisten antar chapter panjang. (default)
+#   - deepseek-3.2       : [PRO]   Runner-up & TERBAIK untuk source CN/JP.
+#                          BUTUH PLAN PRO/ENTERPRISE — basic plan akan
+#                          dapat HTTP 403 "model_not_allowed".
+#   - glm-5              : [basic] Solid untuk CN→ID, kualitas mid-tier.
+#   - minimax-m2.5       : [basic] Decent untuk dialog CN, prosa narasinya
+#                          kurang natural dibanding claude/deepseek.
+#   - minimax-m2.1       : [basic] Versi lama dari m2.5, agak lebih kaku.
+#   - qwen3-coder-next   : [basic] JANGAN dipakai untuk terjemahan novel —
+#                          model ini di-tune untuk kode, output prosa-nya
+#                          kering.
 #
 # Endpoint: <base_url>/chat/completions (OpenAI format).
 # -------------------------------------------------------------------
