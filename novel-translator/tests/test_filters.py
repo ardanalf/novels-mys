@@ -398,8 +398,8 @@ def test_from_config_per_novel_filters_file(tmp_path: Path):
     f.write_text(
         "# komentar\n"
         "\n"
-        "^cleanup-this-line.*$\n"
-        "another-pattern\n",
+        "cleanup-this-line.*\n"
+        "another-pattern\s+oops\n",
         encoding="utf-8",
     )
     eng = filters.FilterEngine.from_config({}, custom_patterns_path=f)
@@ -408,6 +408,29 @@ def test_from_config_per_novel_filters_file(tmp_path: Path):
     assert "cleanup-this-line yes" not in out
     assert "another-pattern oops" not in out
     assert "Real content." in out
+
+
+def test_custom_pattern_anchored_to_full_line_no_false_positive():
+    # Regression: pattern "translated" should NOT match a narrative line
+    # that happens to contain or start with the word.
+    # Custom patterns are documented as full-line anchored, so they must
+    # NOT do partial matches.
+    inp = (
+        "translated version of the original story was a masterpiece.\n"
+        "Translated by Foo\n"   # this is real boilerplate (caught by built-in 'credits')
+    )
+    out, _ = filters.clean_text(inp, custom_patterns=[r"translated"])
+    # Narrative line MUST be preserved despite using the bare custom pattern
+    assert "translated version of the original story was a masterpiece." in out
+
+
+def test_custom_pattern_full_line_match_works():
+    # Sister regression: a bare token as full-line content IS removed.
+    inp = "translated\nReal content.\n"
+    out, _ = filters.clean_text(inp, custom_patterns=[r"translated"])
+    assert "Real content." in out
+    # The standalone "translated" line should be gone
+    assert not any(line.strip() == "translated" for line in out.split("\n"))
 
 
 # ----------------------------------------------------------------------

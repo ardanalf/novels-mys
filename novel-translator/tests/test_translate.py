@@ -160,6 +160,71 @@ def test_build_translation_prompt_substitutes():
     assert "Mana" in prompt
 
 
+def _run_dry_run_filter(novel_subdir: str, chapter_text: str):
+    """Helper: jalankan cmd_translate dengan --dry-run-filter di sandbox.
+
+    Buat NOVELS_DIR sementara, hapus GEMINI_API_KEY, return (rc, novel_dir).
+    """
+    import argparse
+    import os
+    import tempfile
+
+    # Sandbox: NOVELS_DIR di tempfile + API key kosong.
+    tmpdir = Path(tempfile.mkdtemp(prefix="dryrun_"))
+    orig_novels_dir = translate.NOVELS_DIR
+    orig_api_key = os.environ.pop("GEMINI_API_KEY", None)
+    translate.NOVELS_DIR = tmpdir
+
+    try:
+        novel_dir = tmpdir / novel_subdir
+        src = novel_dir / "source"
+        src.mkdir(parents=True)
+        (src / "Chapter_001.txt").write_text(chapter_text, encoding="utf-8")
+
+        args = argparse.Namespace(
+            novel=novel_subdir,
+            lang=None,
+            only=None,
+            rebuild=False,
+            build_glossary=False,
+            dry_run_filter=True,
+            list=False,
+            cmd=None,
+        )
+        rc = translate.cmd_translate(args)
+        return rc, novel_dir
+    finally:
+        translate.NOVELS_DIR = orig_novels_dir
+        if orig_api_key is not None:
+            os.environ["GEMINI_API_KEY"] = orig_api_key
+        # Cleanup sandbox
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_dry_run_filter_works_without_api_key():
+    """Regression: --dry-run-filter must not require GEMINI_API_KEY and must
+    not trigger glossary auto-build (which would call the API)."""
+    rc, _ = _run_dry_run_filter(
+        "_dryrun_test",
+        "Translated by Foo\nReal narrative here.\n",
+    )
+    # Jangan crash dengan RuntimeError ("API key belum diset"), harus return 0.
+    assert rc == 0
+
+
+def test_dry_run_filter_does_not_trigger_glossary_auto_build():
+    """Regression: --dry-run-filter must not trigger glossary auto-build
+    even when glossary is empty and mode='auto' (default)."""
+    rc, novel_dir = _run_dry_run_filter(
+        "_dryrun_glossary_test",
+        "Patreon: patreon.com/foo\nThe story begins.\n",
+    )
+    assert rc == 0
+    # Glossary.json TIDAK boleh tercipta (bukti auto-build tidak terpicu).
+    assert not (novel_dir / "glossary.json").exists()
+
+
 if __name__ == "__main__":
     import traceback
 

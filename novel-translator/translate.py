@@ -651,6 +651,33 @@ def cmd_translate(args: argparse.Namespace) -> int:
         chapters = [c for i, c in enumerate(chapters, 1) if i in wanted]
         logger.info("Filter --only: %d chapter dipilih", len(chapters))
 
+    # Filter engine: bersihkan boilerplate dari source SEBELUM dikirim ke Gemini.
+    # Disetup di awal supaya --dry-run-filter bisa jalan tanpa API key &
+    # tanpa memicu glossary auto-build.
+    filt_cfg = cfg.get("filters", {}) or {}
+    filter_engine = FilterEngine.from_config(filt_cfg, custom_patterns_path=np.filters_path)
+    filter_pre = bool(filt_cfg.get("apply_pre_translation", True)) and bool(filter_engine.enabled)
+    filter_post = bool(filt_cfg.get("apply_post_translation", True)) and bool(filter_engine.enabled)
+
+    # --dry-run-filter: preview baris yang AKAN dihapus, tanpa init Gemini
+    # client, tanpa build glossary, tanpa menerjemahkan apa pun. Murni operasi
+    # lokal supaya tidak menghabiskan kuota API.
+    if getattr(args, "dry_run_filter", False):
+        any_match = False
+        for src_path in chapters:
+            text = src_path.read_text(encoding="utf-8", errors="replace")
+            matches = filter_engine.dry_run(text)
+            if not matches:
+                continue
+            any_match = True
+            logger.info("[%s] %d baris akan dihapus:", src_path.name, len(matches))
+            for line_no, line, cat in matches:
+                logger.info("  L%-4d [%s] %s", line_no, cat, line.strip())
+        if not any_match:
+            logger.info("Tidak ada baris yang match filter di chapter yang dipilih.")
+        logger.info("Mode --dry-run-filter: selesai (tidak ada chapter diterjemahkan).")
+        return 0
+
     # Deteksi bahasa
     if args.lang:
         lang = args.lang
@@ -690,29 +717,6 @@ def cmd_translate(args: argparse.Namespace) -> int:
     add_header = bool(cfg["output"].get("add_header", True))
     pattern = cfg["output"].get("filename_pattern", "{stem}.txt")
     pp_cfg = cfg.get("post_process", {}) or {}
-
-    # Filter engine: bersihkan boilerplate dari source SEBELUM dikirim ke Gemini.
-    filt_cfg = cfg.get("filters", {}) or {}
-    filter_engine = FilterEngine.from_config(filt_cfg, custom_patterns_path=np.filters_path)
-    filter_pre = bool(filt_cfg.get("apply_pre_translation", True)) and bool(filter_engine.enabled)
-    filter_post = bool(filt_cfg.get("apply_post_translation", True)) and bool(filter_engine.enabled)
-
-    # --dry-run-filter: tampilkan baris yang AKAN dihapus, tanpa menerjemahkan.
-    if getattr(args, "dry_run_filter", False):
-        any_match = False
-        for src_path in chapters:
-            text = src_path.read_text(encoding="utf-8", errors="replace")
-            matches = filter_engine.dry_run(text)
-            if not matches:
-                continue
-            any_match = True
-            logger.info("[%s] %d baris akan dihapus:", src_path.name, len(matches))
-            for line_no, line, cat in matches:
-                logger.info("  L%-4d [%s] %s", line_no, cat, line.strip())
-        if not any_match:
-            logger.info("Tidak ada baris yang match filter di chapter yang dipilih.")
-        logger.info("Mode --dry-run-filter: selesai (tidak ada chapter diterjemahkan).")
-        return 0
 
     total = len(chapters)
     done = skipped = failed = 0
