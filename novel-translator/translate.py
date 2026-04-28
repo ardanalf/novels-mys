@@ -23,6 +23,8 @@ import os
 import re
 import sys
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -199,7 +201,23 @@ class Glossary:
 # Gemini Client
 # ============================================================
 
-class GeminiClient:
+class LLMClient:
+    """Common interface untuk LLM provider (Gemini, Runeria, dll).
+
+    Subclass harus expose:
+      - translate_model_name : str
+      - glossary_model_name  : str
+      - generate(prompt, *, model_name=None) -> str
+    """
+
+    translate_model_name: str = ""
+    glossary_model_name: str = ""
+
+    def generate(self, prompt: str, *, model_name: str | None = None) -> str:  # noqa: D401
+        raise NotImplementedError
+
+
+class GeminiClient(LLMClient):
     def __init__(self, cfg: dict[str, Any], logger: logging.Logger):
         self.cfg = cfg
         self.logger = logger
@@ -315,6 +333,134 @@ class GeminiClient:
             return str(resp.candidates[0].finish_reason)
         except Exception:
             return "unknown"
+
+
+class RuneriaClient(LLMClient):
+    """OpenAI-compatible client untuk Runeria (https://runeria.fun).
+
+    Endpoint: <base_url>/chat/completions
+    Auth: Authorization: Bearer <key>
+
+    Bisa juga dipakai untuk provider OpenAI-compatible lain dengan ganti
+    base_url di config.yaml.
+    """
+
+    def __init__(self, cfg: dict[str, Any], logger: logging.Logger):
+        self.cfg = cfg
+        self.logger = logger
+        rcfg = cfg.get("runeria", {}) or {}
+
+        api_key = os.environ.get("RUNERIA_API_KEY") or str(rcfg.get("api_key", "")).strip()
+        if not api_key:
+            raise RuntimeError(
+                "RUNERIA_API_KEY belum diset. Set environment variable RUNERIA_API_KEY "
+                "atau isi runeria.api_key di config.yaml."
+            )
+        self.api_key = api_key
+        self.base_url = str(rcfg.get("base_url", "https://runeria.fun/v1")).rstrip("/")
+
+        self.translate_model_name = rcfg.get("model", "claude-sonnet-4")
+        self.glossary_model_name = rcfg.get("glossary_model", self.translate_model_name)
+
+        self.temperature = float(rcfg.get("temperature", 0.3))
+        self.max_tokens = int(rcfg.get("max_output_tokens", 16384))
+
+        self.rpm = int(rcfg.get("requests_per_minute", 30))
+        self.max_retries = int(rcfg.get("max_retries", 5))
+        self.retry_base = float(rcfg.get("retry_base_delay", 5))
+        self.timeout = float(rcfg.get("timeout_seconds", 120))
+        self._last_call = 0.0
+
+    def _rate_limit(self) -> None:
+        if self.rpm <= 0:
+            return
+        min_interval = 60.0 / self.rpm
+        now = time.time()
+        wait = min_interval - (now - self._last_call)
+        if wait > 0:
+            self.logger.debug("Rate limit: tunggu %.1fs", wait)
+            time.sleep(wait)
+        self._last_call = time.time()
+
+    def _post(self, body: bytes) -> dict[str, Any]:
+        url = f"{self.base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            raw = resp.read().decode("utf-8")
+        return json.loads(raw)
+
+    def generate(self, prompt: str, *, model_name: str | None = None) -> str:
+        model_name = model_name or self.translate_model_name
+        body = json.dumps({
+            "model": model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }).encode("utf-8")
+
+        last_err: Exception | None = None
+        for attempt in range(1, self.max_retries + 1):
+            self._rate_limit()
+            try:
+                data = self._post(body)
+                # OpenAI-compatible format
+                choice = (data.get("choices") or [{}])[0]
+                msg = (choice.get("message") or {})
+                text = msg.get("content") or ""
+                if not text or not text.strip():
+                    finish = choice.get("finish_reason", "unknown")
+                    raise RuntimeError(f"Response kosong (finish_reason={finish})")
+                return text
+            except urllib.error.HTTPError as e:
+                last_err = e
+                try:
+                    body_text = e.read().decode("utf-8", errors="replace")
+                except Exception:
+                    body_text = ""
+                snippet = body_text[:300]
+                is_quota = e.code == 429 or "quota" in body_text.lower() or "rate" in body_text.lower()
+                delay = self.retry_base * (2 ** (attempt - 1))
+                if is_quota:
+                    delay = max(delay, 30)
+                self.logger.warning(
+                    "Runeria gagal (attempt %d/%d): HTTP %d %s — retry dalam %.1fs",
+                    attempt, self.max_retries, e.code, snippet, delay,
+                )
+                if attempt < self.max_retries:
+                    time.sleep(delay)
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as e:
+                last_err = e
+                delay = self.retry_base * (2 ** (attempt - 1))
+                self.logger.warning(
+                    "Runeria gagal (attempt %d/%d): %s — retry dalam %.1fs",
+                    attempt, self.max_retries, e, delay,
+                )
+                if attempt < self.max_retries:
+                    time.sleep(delay)
+        raise RuntimeError(f"Runeria gagal setelah {self.max_retries} percobaan: {last_err}")
+
+
+SUPPORTED_ENGINES = ("gemini", "runeria")
+
+
+def create_llm_client(
+    cfg: dict[str, Any],
+    logger: logging.Logger,
+    engine_override: str | None = None,
+) -> LLMClient:
+    """Factory pilih LLM provider berdasarkan config / CLI override."""
+    engine = (engine_override or str(cfg.get("engine") or "gemini")).lower().strip()
+    if engine == "gemini":
+        return GeminiClient(cfg, logger)
+    if engine == "runeria":
+        return RuneriaClient(cfg, logger)
+    raise ValueError(
+        f"Engine '{engine}' tidak dikenal. Pilih: {', '.join(SUPPORTED_ENGINES)}."
+    )
 
 
 # ============================================================
@@ -513,7 +659,7 @@ def build_translation_prompt(template: str, text: str, glossary: Glossary) -> st
 
 
 def translate_chapter(
-    client: GeminiClient,
+    client: LLMClient,
     text: str,
     lang: str,
     glossary: Glossary,
@@ -544,7 +690,7 @@ def translate_chapter(
 # ============================================================
 
 def extract_glossary_from_chapters(
-    client: GeminiClient,
+    client: LLMClient,
     chapters: list[Path],
     lang: str,
     n_samples: int,
@@ -688,7 +834,11 @@ def cmd_translate(args: argparse.Namespace) -> int:
         logger.info("Bahasa terdeteksi: %s", lang)
 
     # Init Gemini client
-    client = GeminiClient(cfg, logger)
+    client = create_llm_client(cfg, logger, getattr(args, "engine", None))
+    logger.info(
+        "Engine: %s | model translate=%s | model glossary=%s",
+        client.__class__.__name__, client.translate_model_name, client.glossary_model_name,
+    )
 
     # Glossary
     glossary = Glossary.load(np.glossary_path)
@@ -817,6 +967,8 @@ def build_argparser() -> argparse.ArgumentParser:
         help="Paksa bahasa sumber (default: auto-detect). Pilihan: en, jp, kr, cn.",
     )
     p.add_argument("--only", help="Range chapter, contoh: '1-10' atau '1,3,5-8'")
+    p.add_argument("--engine", choices=SUPPORTED_ENGINES,
+                   help="Override LLM engine (default dari config.yaml: gemini)")
     p.add_argument("--rebuild", action="store_true", help="Timpa file terjemahan yang sudah ada")
     p.add_argument("--build-glossary", action="store_true",
                    help="Bangun ulang glossary.json lalu berhenti (tidak menerjemahkan)")
