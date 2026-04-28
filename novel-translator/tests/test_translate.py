@@ -163,17 +163,38 @@ def test_build_translation_prompt_substitutes():
 def _run_dry_run_filter(novel_subdir: str, chapter_text: str):
     """Helper: jalankan cmd_translate dengan --dry-run-filter di sandbox.
 
-    Buat NOVELS_DIR sementara, hapus GEMINI_API_KEY, return (rc, novel_dir).
+    Buat NOVELS_DIR sementara, hapus GEMINI_API_KEY, dan capture state
+    filesystem & spy SEBELUM cleanup supaya caller bisa assert dengan akurat.
+
+    Returns dict berisi:
+      - rc: return code dari cmd_translate
+      - glossary_existed: True kalau glossary.json tercipta selama
+        cmd_translate jalan (bukti glossary auto-build kepicu).
+      - gemini_client_called: True kalau GeminiClient() di-instantiate
+        (bukti API path ke-reach).
     """
     import argparse
     import os
+    import shutil
     import tempfile
 
     # Sandbox: NOVELS_DIR di tempfile + API key kosong.
     tmpdir = Path(tempfile.mkdtemp(prefix="dryrun_"))
     orig_novels_dir = translate.NOVELS_DIR
     orig_api_key = os.environ.pop("GEMINI_API_KEY", None)
+    orig_client = translate.GeminiClient
+
+    # Spy: track kalau GeminiClient di-instantiate. Kalau ya, dry-run path
+    # tidak benar-benar lokal (bug yang kita coba prevent).
+    spy: dict = {"called": False}
+
+    class _SpyGeminiClient:
+        def __init__(self, *args, **kwargs):
+            spy["called"] = True
+            raise RuntimeError("GeminiClient should NOT be instantiated during --dry-run-filter")
+
     translate.NOVELS_DIR = tmpdir
+    translate.GeminiClient = _SpyGeminiClient  # type: ignore[misc]
 
     try:
         novel_dir = tmpdir / novel_subdir
@@ -192,37 +213,51 @@ def _run_dry_run_filter(novel_subdir: str, chapter_text: str):
             cmd=None,
         )
         rc = translate.cmd_translate(args)
-        return rc, novel_dir
+
+        # Snapshot filesystem state SEBELUM cleanup. Kalau dicek caller
+        # setelah cleanup, novel_dir sudah dihapus jadi .exists() selalu False
+        # (assertion vacuously true).
+        glossary_existed = (novel_dir / "glossary.json").exists()
+
+        return {
+            "rc": rc,
+            "glossary_existed": glossary_existed,
+            "gemini_client_called": spy["called"],
+        }
     finally:
         translate.NOVELS_DIR = orig_novels_dir
+        translate.GeminiClient = orig_client  # type: ignore[misc]
         if orig_api_key is not None:
             os.environ["GEMINI_API_KEY"] = orig_api_key
-        # Cleanup sandbox
-        import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def test_dry_run_filter_works_without_api_key():
     """Regression: --dry-run-filter must not require GEMINI_API_KEY and must
-    not trigger glossary auto-build (which would call the API)."""
-    rc, _ = _run_dry_run_filter(
+    not instantiate GeminiClient (purely local operation)."""
+    result = _run_dry_run_filter(
         "_dryrun_test",
         "Translated by Foo\nReal narrative here.\n",
     )
     # Jangan crash dengan RuntimeError ("API key belum diset"), harus return 0.
-    assert rc == 0
+    assert result["rc"] == 0
+    # GeminiClient TIDAK boleh di-instantiate sama sekali untuk dry-run.
+    assert result["gemini_client_called"] is False
 
 
 def test_dry_run_filter_does_not_trigger_glossary_auto_build():
     """Regression: --dry-run-filter must not trigger glossary auto-build
     even when glossary is empty and mode='auto' (default)."""
-    rc, novel_dir = _run_dry_run_filter(
+    result = _run_dry_run_filter(
         "_dryrun_glossary_test",
         "Patreon: patreon.com/foo\nThe story begins.\n",
     )
-    assert rc == 0
+    assert result["rc"] == 0
     # Glossary.json TIDAK boleh tercipta (bukti auto-build tidak terpicu).
-    assert not (novel_dir / "glossary.json").exists()
+    assert result["glossary_existed"] is False
+    # Dan GeminiClient (yang di-init sebelum auto-build di kode buggy) juga
+    # tidak boleh dipanggil.
+    assert result["gemini_client_called"] is False
 
 
 if __name__ == "__main__":
