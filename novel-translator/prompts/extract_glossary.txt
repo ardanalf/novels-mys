@@ -1,0 +1,31 @@
+Anda adalah asisten yang membuat glossary (kamus istilah) untuk konsistensi terjemahan novel.
+
+Dari teks novel di bawah ini (bahasa: {source_language}), ekstrak hal-hal berikut dan keluarkan dalam format JSON yang VALID. JANGAN tulis apa pun di luar JSON.
+
+Yang harus diekstrak:
+1. characters     : nama karakter (orang, dewa, monster bernama). Key = bentuk asli di teks, value = bentuk yang akan dipakai di terjemahan Indonesia (untuk JP biasanya romaji + sufiks dipertahankan, untuk EN biasanya sama).
+2. places         : nama tempat, lokasi, kerajaan, kota, dungeon.
+3. terms          : istilah khusus / world-building (skill, sihir, ras, organisasi, mata uang, level, status, dll).
+4. style_notes    : 1-3 kalimat singkat soal gaya narasi (POV, tone, formal/kasual, genre).
+
+Format output WAJIB:
+{{
+  "characters": {{"<asli>": "<terjemahan>", ...}},
+  "places":     {{"<asli>": "<terjemahan>", ...}},
+  "terms":      {{"<asli>": "<terjemahan>", ...}},
+  "style_notes": "..."
+}}
+
+Aturan:
+- Hanya masukkan entitas yang BENAR-BENAR muncul di teks.
+- Untuk Bahasa Jepang: gunakan romaji untuk nama karakter & tempat (contoh: 田中 → "Tanaka", 雪音 → "Yukine"). Sufiks -san/-kun/-chan/-sama dipertahankan.
+- Untuk istilah/skill: berikan terjemahan Indonesia yang natural, atau pertahankan istilah aslinya kalau lebih cocok (contoh: "Mana", "Status", "Skill" sering dipertahankan).
+- Hindari kata umum seperti "dia", "rumah", "pohon".
+- JANGAN tulis komentar, markdown ```json, atau teks pembuka/penutup. Hanya JSON murni.
+
+TEKS:
+---
+{text}
+---
+
+JSON:

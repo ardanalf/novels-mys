@@ -1,0 +1,77 @@
+# ===================================================================
+# Konfigurasi Novel Translator
+# ===================================================================
+# API key Gemini bisa diisi di sini ATAU lewat environment variable
+# GEMINI_API_KEY (env var lebih diutamakan dan lebih aman).
+# Dapatkan API key gratis di: https://aistudio.google.com/apikey
+# ===================================================================
+
+gemini:
+  # Kosongkan kalau pakai env var GEMINI_API_KEY (rekomendasi)
+  api_key: ""
+
+  # Model free tier:
+  #   - gemini-2.5-flash       : cepat, kualitas bagus, kuota free paling besar (REKOMENDASI)
+  #   - gemini-2.5-flash-lite  : paling cepat, kualitas cukup, kuota lebih besar
+  #   - gemini-2.5-pro         : kualitas terbaik tapi free tier-nya ketat
+  model: "gemini-2.5-flash"
+
+  # Untuk ekstrak glossary lebih baik pakai model yang lebih kuat
+  glossary_model: "gemini-2.5-flash"
+
+  # Generation settings
+  temperature: 0.3        # rendah = konsisten, tinggi = kreatif
+  max_output_tokens: 16384
+
+  # Rate limit handling (Gemini Free Tier: 10 RPM untuk flash, 5 RPM untuk pro)
+  requests_per_minute: 8  # diset sedikit di bawah limit biar aman
+  max_retries: 5
+  retry_base_delay: 5     # detik, exponential backoff
+
+translation:
+  target_language: "Indonesian"
+
+  # Style: natural | literal | webnovel
+  style: "natural"
+
+  # Chunking: kalau chapter terlalu panjang, dipotong jadi beberapa bagian
+  # supaya tidak kena limit token. Disambung lagi otomatis.
+  max_chars_per_chunk: 8000      # ~ aman untuk model 1M context
+  chunk_overlap_chars: 200       # overlap supaya konteks nyambung
+
+glossary:
+  # Mode glossary:
+  #   - auto    : ekstrak otomatis dari beberapa chapter awal pakai LLM
+  #   - manual  : pakai glossary.json yang sudah kamu isi sendiri
+  #   - skip    : tanpa glossary (paling cepat tapi nama bisa inkonsisten)
+  mode: "auto"
+
+  # Berapa chapter awal yang dipakai untuk ekstrak glossary
+  sample_chapters: 3
+
+output:
+  # Pola nama file output. Variabel: {stem} = nama file source tanpa ekstensi
+  filename_pattern: "{stem}.txt"
+
+  # Tambahkan header info di file hasil terjemahan?
+  add_header: true
+
+post_process:
+  # Normalisasi otomatis kata ganti formal "Anda/Saya" -> "kamu/aku" SETELAH
+  # Gemini menerjemahkan. Aktifkan kalau hasil masih sering pakai "Anda/Saya"
+  # di konteks kasual padahal prompt sudah meminta sebaliknya.
+  #
+  # CARA KERJA:
+  #   - Bekerja per-paragraf.
+  #   - Mode "safe" (default kalau diaktifkan): paragraf yang mengandung
+  #     penanda formal seperti "Yang Mulia", "Paduka", "Tuan ", "Nyonya",
+  #     "Jenderal", "Komandan", "Hamba", "Dengan hormat", "Shifu", "Senpai",
+  #     dll TIDAK ikut diganti — jadi dialog formal tetap terjaga.
+  #   - Mode "aggressive": ganti SEMUA "Anda/Saya" tanpa kecuali. Pakai
+  #     hanya kalau kamu yakin tidak ada konteks formal di novelnya.
+  normalize_pronouns: false
+  normalize_pronouns_strength: "safe"  # safe | aggressive
+
+logging:
+  level: "INFO"           # DEBUG | INFO | WARNING | ERROR
+  log_to_file: true
