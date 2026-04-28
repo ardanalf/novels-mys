@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from filters import FilterEngine
+
 try:
     import yaml
 except ImportError:
@@ -437,6 +439,7 @@ class NovelPaths:
     translated: Path
     glossary_path: Path
     progress_path: Path
+    filters_path: Path
 
     @classmethod
     def from_name(cls, name: str) -> "NovelPaths":
@@ -448,6 +451,7 @@ class NovelPaths:
             translated=root / "translated",
             glossary_path=root / "glossary.json",
             progress_path=root / ".progress",
+            filters_path=root / "filters.txt",
         )
 
     def ensure(self) -> None:
@@ -687,6 +691,29 @@ def cmd_translate(args: argparse.Namespace) -> int:
     pattern = cfg["output"].get("filename_pattern", "{stem}.txt")
     pp_cfg = cfg.get("post_process", {}) or {}
 
+    # Filter engine: bersihkan boilerplate dari source SEBELUM dikirim ke Gemini.
+    filt_cfg = cfg.get("filters", {}) or {}
+    filter_engine = FilterEngine.from_config(filt_cfg, custom_patterns_path=np.filters_path)
+    filter_pre = bool(filt_cfg.get("apply_pre_translation", True)) and bool(filter_engine.enabled)
+    filter_post = bool(filt_cfg.get("apply_post_translation", True)) and bool(filter_engine.enabled)
+
+    # --dry-run-filter: tampilkan baris yang AKAN dihapus, tanpa menerjemahkan.
+    if getattr(args, "dry_run_filter", False):
+        any_match = False
+        for src_path in chapters:
+            text = src_path.read_text(encoding="utf-8", errors="replace")
+            matches = filter_engine.dry_run(text)
+            if not matches:
+                continue
+            any_match = True
+            logger.info("[%s] %d baris akan dihapus:", src_path.name, len(matches))
+            for line_no, line, cat in matches:
+                logger.info("  L%-4d [%s] %s", line_no, cat, line.strip())
+        if not any_match:
+            logger.info("Tidak ada baris yang match filter di chapter yang dipilih.")
+        logger.info("Mode --dry-run-filter: selesai (tidak ada chapter diterjemahkan).")
+        return 0
+
     total = len(chapters)
     done = skipped = failed = 0
 
@@ -707,6 +734,22 @@ def cmd_translate(args: argparse.Namespace) -> int:
             skipped += 1
             continue
 
+        # Pre-translation filter: hapus boilerplate dari source.
+        if filter_pre:
+            cleaned, fstats = filter_engine.clean(text)
+            if fstats.total_removed() or fstats.html_substitutions:
+                logger.info(
+                    "%s — filter source: -%d baris (%s) -%d HTML residue",
+                    prefix, fstats.total_removed(),
+                    ", ".join(f"{k}={v}" for k, v in fstats.removed_lines.items()),
+                    fstats.html_substitutions,
+                )
+            text = cleaned
+            if not text.strip():
+                logger.warning("%s — kosong setelah filter, skip", prefix)
+                skipped += 1
+                continue
+
         logger.info("%s — menerjemahkan (%d chars) …", prefix, len(text))
         try:
             translated = translate_chapter(client, text, lang, glossary, cfg, logger)
@@ -724,6 +767,16 @@ def cmd_translate(args: argparse.Namespace) -> int:
                 strength=str(pp_cfg.get("normalize_pronouns_strength", "safe")),
                 logger=logger,
             )
+
+        # Post-translation filter: bersihkan residu yang lolos dari Gemini
+        # (HTML residue, baris boilerplate yang ikut tertranslate, whitespace).
+        if filter_post:
+            translated, post_stats = filter_engine.clean(translated)
+            if post_stats.total_removed() or post_stats.html_substitutions:
+                logger.info(
+                    "%s — filter output: -%d baris -%d HTML residue",
+                    prefix, post_stats.total_removed(), post_stats.html_substitutions,
+                )
 
         body = translated
         if add_header:
@@ -763,6 +816,8 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--rebuild", action="store_true", help="Timpa file terjemahan yang sudah ada")
     p.add_argument("--build-glossary", action="store_true",
                    help="Bangun ulang glossary.json lalu berhenti (tidak menerjemahkan)")
+    p.add_argument("--dry-run-filter", action="store_true",
+                   help="Tampilkan baris source yang AKAN dihapus filter (tanpa menerjemahkan)")
     p.add_argument("--list", action="store_true", help="Daftar novel yang terdeteksi & statusnya")
 
     sub.add_parser("list", help="alias untuk --list")

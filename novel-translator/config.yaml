@@ -56,6 +56,47 @@ output:
   # Tambahkan header info di file hasil terjemahan?
   add_header: true
 
+filters:
+  # Pembersih boilerplate chapter — terutama untuk chapter yang di-scrape
+  # dari website translator (sering ada baris kredit, link Patreon/Discord,
+  # navigasi prev/next, watermark, dll yang tidak perlu ikut diterjemahkan).
+  #
+  # Filter dijalankan DUA TAHAP:
+  #   1. Pre-translation : source dibersihkan SEBELUM dikirim ke Gemini.
+  #                        Hemat token, dan boilerplate tidak ikut diterjemahkan.
+  #   2. Post-translation: hasil terjemahan dibersihkan lagi sebagai pengaman
+  #                        (kalau ada residu HTML / boilerplate yang lolos).
+  #
+  # Lihat baris yang AKAN dihapus dengan: --dry-run-filter
+  enabled: true
+  apply_pre_translation: true
+  apply_post_translation: true
+
+  categories:
+    credits: true       # "Translated by", "TL:", "Editor:", source attribution
+    donate: true        # Patreon, Ko-fi, PayPal, Buy Me a Coffee, Saweria, Trakteer
+    social: true        # Discord, Telegram, Twitter/X, Instagram, dll
+    navigation: true    # "Prev | Next | Index", garis pemisah polos
+    ads: true           # "Like and comment", "Subscribe", "Rate this novel"
+    schedule: true      # "Sponsored chapter", "Bonus chapter", release schedule
+    tl_notes: false     # Author/Translator notes — DEFAULT KEEP karena sering
+                        # ada konteks penting. Set true kalau mau hapus.
+    html_residue: true  # &nbsp;, <p>, <br>, dll
+    footer: true        # "All rights reserved", "© 2024", "Do not repost"
+    whitespace: true    # Normalize multiple blank lines, trailing spaces
+    novelupdates: true  # Pola spesifik NovelUpdates (vote on NU, NU reading list)
+
+  # Tambahan regex inline (semua case-insensitive, anchor ke BARIS penuh).
+  # Setiap pola harus match seluruh baris untuk menghapusnya.
+  custom_patterns: []
+
+  # Tambahan: kamu juga bisa simpan pola per-novel di file
+  #   novels/<nama_novel>/filters.txt
+  # (1 regex per baris, blank lines & '#' komentar diabaikan).
+  # Contoh isi filters.txt:
+  #   ^translated\s+by\s+ardanalf\b.*
+  #   ^https?://ardanalfino\.my\.id/.*
+
 post_process:
   # Normalisasi otomatis kata ganti formal "Anda/Saya" -> "kamu/aku" SETELAH
   # Gemini menerjemahkan. Aktifkan kalau hasil masih sering pakai "Anda/Saya"
