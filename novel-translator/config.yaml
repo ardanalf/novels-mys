@@ -6,11 +6,15 @@
 # Dapatkan API key gratis di: https://aistudio.google.com/apikey
 # ===================================================================
 
-# LLM provider yang dipakai. Pilihan: "gemini" | "runeria"
-#   - gemini  : Google Gemini (free tier 500 req/hari untuk flash, butuh GEMINI_API_KEY)
-#   - runeria : OpenAI-compatible gateway (https://runeria.fun/v1), butuh RUNERIA_API_KEY
+# LLM provider yang dipakai. Pilihan: "gemini" | "runeria" | "cline"
+#   - gemini  : Google Gemini (free tier 500 req/hari, butuh GEMINI_API_KEY)
+#   - runeria : OpenAI-compatible https://runeria.fun/v1 (butuh RUNERIA_API_KEY)
+#               Plan basic: claude-sonnet-4, claude-haiku-4.5
+#   - cline   : OpenAI-compatible https://api.cline.bot/api/v1 (butuh CLINE_API_KEY)
+#               Models: moonshotai/kimi-k2.6, minimax/minimax-m2.5, z-ai/glm-5
 #
 # Bisa di-override sekali pakai dari CLI: --engine runeria
+# Atau pakai menu interaktif: jalan `python translate.py` tanpa argumen.
 engine: "gemini"
 
 gemini:
@@ -40,18 +44,18 @@ gemini:
 # di atas, atau dari CLI: --engine runeria.
 #
 # Model yang direkomendasikan untuk terjemahan novel ID (urut dari terbaik):
-#   - claude-sonnet-4    : TERBAIK. Nuansa dialog & POV halus, naturally
-#                          pilih "aku/kamu" untuk kasual, konsisten antar
-#                          chapter panjang. (default)
-#   - deepseek-3.2       : Runner-up & TERBAIK untuk source CN/JP karena
-#                          dilatih banyak data Asia. Bagus juga sebagai
-#                          fallback kalau claude habis.
-#   - glm-5              : Solid untuk CN→ID, kualitas mid-tier.
-#   - minimax-m2.5       : Decent untuk dialog CN, prosa narasinya kurang
-#                          natural dibanding claude/deepseek.
-#   - minimax-m2.1       : Versi lama dari m2.5, agak lebih kaku.
-#   - qwen3-coder-next   : JANGAN dipakai untuk terjemahan novel — model
-#                          ini di-tune untuk kode, output prosa-nya kering.
+#   - claude-sonnet-4    : [basic] TERBAIK. Nuansa dialog & POV halus,
+#                          naturally pilih "aku/kamu" untuk kasual,
+#                          konsisten antar chapter panjang. (default)
+#   - claude-haiku-4.5   : [basic] Versi lebih cepat & murah dari sonnet.
+#                          Sedikit di bawah sonnet untuk dialog halus, tapi
+#                          jauh lebih cepat — bagus untuk batch besar.
+#   - deepseek-3.2       : [PRO]   TERBAIK untuk source CN/JP, BUTUH PLAN
+#                          PRO/ENTERPRISE — basic plan dapat HTTP 403.
+#   - glm-5              : [PRO?]  Cek plan-mu.
+#   - minimax-m2.5       : [PRO?]  Cek plan-mu.
+#   - qwen3-coder-next   : [basic] JANGAN dipakai untuk terjemahan novel —
+#                          model ini di-tune untuk kode, output kering.
 #
 # Endpoint: <base_url>/chat/completions (OpenAI format).
 # -------------------------------------------------------------------
@@ -67,6 +71,36 @@ runeria:
   max_output_tokens: 16384
 
   # Rate limit (sesuaikan dengan plan Runeria-mu)
+  requests_per_minute: 30
+  max_retries: 5
+  retry_base_delay: 5
+  timeout_seconds: 120
+
+# -------------------------------------------------------------------
+# Cline (https://app.cline.bot). Aktifkan dengan engine: "cline" di atas,
+# atau dari CLI: --engine cline.
+#
+# Model yang tersedia (sesuai info dari user — cek dashboard Cline kamu
+# untuk yang aktif di plan-mu):
+#   - moonshotai/kimi-k2.6      : kandidat default — kimi terkenal kuat
+#                                 untuk source CN/JP & dialog panjang.
+#   - minimax/minimax-m2.5      : versi terbaru minimax di Cline.
+#   - z-ai/glm-5                : solid CN→ID, mid-tier.
+#   - kwaipilot/kat-coder-pro   : SKIP (coder model, output kering).
+#
+# Endpoint: <base_url>/chat/completions (OpenAI format).
+# -------------------------------------------------------------------
+cline:
+  # Kosongkan kalau pakai env var CLINE_API_KEY (rekomendasi)
+  api_key: ""
+
+  base_url: "https://api.cline.bot/api/v1"
+  model: "moonshotai/kimi-k2.6"
+  glossary_model: "moonshotai/kimi-k2.6"
+
+  temperature: 0.3
+  max_output_tokens: 16384
+
   requests_per_minute: 30
   max_retries: 5
   retry_base_delay: 5

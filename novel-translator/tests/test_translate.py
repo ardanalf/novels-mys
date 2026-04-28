@@ -603,6 +603,245 @@ def test_runeria_empty_response_triggers_retry_and_fail():
     raise AssertionError("Expected RuntimeError untuk response kosong")
 
 
+def test_runeria_403_fails_fast_no_retry():
+    """HTTP 403 (mis. model butuh plan Pro) harus fail-fast tanpa retry sia-sia."""
+    import urllib.error
+
+    cfg = {"engine": "runeria", "runeria": {
+        "api_key": "fake", "requests_per_minute": 0,
+        "max_retries": 5, "retry_base_delay": 0,
+    }}
+    client = translate.create_llm_client(cfg, _silent_logger())
+
+    calls = {"n": 0}
+    body_403 = (
+        b'{"error":{"message":"Model requires Pro plan",'
+        b'"code":"model_not_allowed"}}'
+    )
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(
+            req.full_url, 403, "Forbidden", {}, io.BytesIO(body_403),
+        )
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        try:
+            client.generate("hello")
+        except RuntimeError as e:
+            # Pesan harus mention 403 dan body, supaya user paham
+            assert "403" in str(e)
+            assert "Pro plan" in str(e) or "model_not_allowed" in str(e)
+        else:
+            raise AssertionError("Expected RuntimeError pada 403")
+
+    # Tidak boleh retry — cuma 1 call walaupun max_retries=5
+    assert calls["n"] == 1, f"403 jangan di-retry, tapi terjadi {calls['n']} call"
+
+
+def test_runeria_400_fails_fast_no_retry():
+    """HTTP 400 (bad request, mis. payload salah) juga harus fail-fast."""
+    import urllib.error
+
+    cfg = {"engine": "runeria", "runeria": {
+        "api_key": "fake", "requests_per_minute": 0,
+        "max_retries": 5, "retry_base_delay": 0,
+    }}
+    client = translate.create_llm_client(cfg, _silent_logger())
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(
+            req.full_url, 400, "Bad Request", {}, io.BytesIO(b'{"error":"x"}'),
+        )
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        try:
+            client.generate("hello")
+        except RuntimeError:
+            pass
+    assert calls["n"] == 1
+
+
+def test_runeria_503_is_retried():
+    """HTTP 503 (server overload) harus di-retry — sementara, bukan permanen."""
+    import urllib.error
+
+    cfg = {"engine": "runeria", "runeria": {
+        "api_key": "fake", "requests_per_minute": 0,
+        "max_retries": 3, "retry_base_delay": 0,
+    }}
+    client = translate.create_llm_client(cfg, _silent_logger())
+    calls = {"n": 0}
+
+    class _FakeResp:
+        def __init__(self, payload):
+            self._buf = json.dumps(payload).encode("utf-8")
+        def read(self): return self._buf
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.HTTPError(
+                req.full_url, 503, "Service Unavailable", {},
+                io.BytesIO(b'{"error":"high load"}'),
+            )
+        return _FakeResp({"choices": [{"message": {"content": "ok lagi"}}]})
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        out = client.generate("hello")
+    assert out == "ok lagi"
+    assert calls["n"] == 2
+
+
+# ----------------------------------------------------------------------
+# Cline engine
+# ----------------------------------------------------------------------
+
+def test_engine_cline_factory_picks_cline():
+    cfg = {"engine": "cline", "cline": {"api_key": "fake-cline-key"}}
+    client = translate.create_llm_client(cfg, _silent_logger())
+    assert isinstance(client, translate.ClineClient)
+    assert client.translate_model_name == "moonshotai/kimi-k2.6"
+    assert "cline.bot" in client.base_url
+
+
+def test_cline_requires_api_key():
+    cfg = {"engine": "cline", "cline": {"api_key": ""}}
+    orig = os.environ.pop("CLINE_API_KEY", None)
+    try:
+        try:
+            translate.create_llm_client(cfg, _silent_logger())
+        except RuntimeError as e:
+            assert "CLINE_API_KEY" in str(e)
+            return
+        raise AssertionError("Expected RuntimeError tanpa API key")
+    finally:
+        if orig is not None:
+            os.environ["CLINE_API_KEY"] = orig
+
+
+def test_cline_generate_posts_to_cline_endpoint():
+    """Mock urlopen, pastikan URL & auth header benar untuk Cline."""
+    cfg = {"engine": "cline", "cline": {
+        "api_key": "fake", "requests_per_minute": 0,
+    }}
+    client = translate.create_llm_client(cfg, _silent_logger())
+    captured = {}
+
+    class _FakeResp:
+        def __init__(self, payload):
+            self._buf = json.dumps(payload).encode("utf-8")
+        def read(self): return self._buf
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp({"choices": [{"message": {"content": "halo"}}]})
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        out = client.generate("test")
+    assert out == "halo"
+    assert captured["url"] == "https://api.cline.bot/api/v1/chat/completions"
+    assert captured["body"]["model"] == "moonshotai/kimi-k2.6"
+
+
+def test_engine_models_includes_cline_kimi():
+    """ENGINE_MODELS dipakai menu untuk show pilihan; pastikan basic content ada."""
+    assert "cline" in translate.ENGINE_MODELS
+    assert "moonshotai/kimi-k2.6" in translate.ENGINE_MODELS["cline"]
+    # Runeria basic plan: claude-sonnet-4 & claude-haiku-4.5 wajib ada
+    assert "claude-sonnet-4" in translate.ENGINE_MODELS["runeria"]
+    assert "claude-haiku-4.5" in translate.ENGINE_MODELS["runeria"]
+
+
+# ----------------------------------------------------------------------
+# Config patcher (untuk menu "Ganti engine & model" -> simpan permanen)
+# ----------------------------------------------------------------------
+
+def _write_temp_yaml(content: str) -> Path:
+    import tempfile
+    f = Path(tempfile.mkstemp(suffix=".yaml")[1])
+    f.write_text(content, encoding="utf-8")
+    return f
+
+
+def test_patch_top_level_replaces_engine():
+    p = _write_temp_yaml(
+        '# header comment\n'
+        'engine: "gemini"\n'
+        '\n'
+        'gemini:\n'
+        '  model: "x"\n'
+    )
+    try:
+        ok = translate._patch_config_top_level(p, "engine", "cline")
+        assert ok
+        text = p.read_text(encoding="utf-8")
+        assert 'engine: "cline"' in text
+        assert "# header comment" in text  # comment preserved
+        assert 'model: "x"' in text         # nested key not touched
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_patch_top_level_does_not_touch_nested_engine_key():
+    """`  engine: x` di dalam section harus tidak terkena patch top-level."""
+    p = _write_temp_yaml(
+        'engine: "gemini"\n'
+        '\n'
+        'foo:\n'
+        '  engine: "should-not-change"\n'
+    )
+    try:
+        translate._patch_config_top_level(p, "engine", "cline")
+        text = p.read_text(encoding="utf-8")
+        assert 'engine: "cline"' in text
+        assert 'engine: "should-not-change"' in text
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_patch_nested_replaces_only_target_section():
+    p = _write_temp_yaml(
+        'gemini:\n'
+        '  model: "gemini-2.5-flash"\n'
+        '\n'
+        'runeria:\n'
+        '  model: "claude-sonnet-4"\n'
+        '  glossary_model: "claude-sonnet-4"\n'
+        '\n'
+        'cline:\n'
+        '  model: "moonshotai/kimi-k2.6"\n'
+    )
+    try:
+        ok = translate._patch_config_nested(p, "runeria", "model", "claude-haiku-4.5")
+        assert ok
+        text = p.read_text(encoding="utf-8")
+        assert 'model: "claude-haiku-4.5"' in text
+        # Section lain tidak boleh berubah
+        assert 'model: "gemini-2.5-flash"' in text
+        assert 'model: "moonshotai/kimi-k2.6"' in text
+        # glossary_model di runeria masih utuh (belum di-patch)
+        assert 'glossary_model: "claude-sonnet-4"' in text
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_patch_nested_returns_false_when_section_missing():
+    p = _write_temp_yaml('gemini:\n  model: "x"\n')
+    try:
+        ok = translate._patch_config_nested(p, "nonexistent", "model", "y")
+        assert ok is False
+    finally:
+        p.unlink(missing_ok=True)
+
+
 def test_runeria_429_is_retried():
     """HTTP 429 harus retry, dan kalau berhasil di percobaan kedua, return ok."""
     import urllib.error

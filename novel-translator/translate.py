@@ -346,31 +346,47 @@ class GeminiClient(LLMClient):
             return "unknown"
 
 
-class RuneriaClient(LLMClient):
-    """OpenAI-compatible client untuk Runeria (https://runeria.fun).
+class OpenAICompatibleClient(LLMClient):
+    """Client umum untuk provider OpenAI-compatible (POST <base>/chat/completions).
 
-    Endpoint: <base_url>/chat/completions
-    Auth: Authorization: Bearer <key>
+    Subclass cukup override class attribute berikut:
+      provider_label    : str  -- nama untuk log (mis. "Runeria", "Cline")
+      env_key_name      : str  -- nama env var (mis. "RUNERIA_API_KEY")
+      config_section    : str  -- nama section di config.yaml (mis. "runeria")
+      default_base_url  : str
+      default_model     : str
 
-    Bisa juga dipakai untuk provider OpenAI-compatible lain dengan ganti
-    base_url di config.yaml.
+    Format request OpenAI:
+      POST <base_url>/chat/completions
+      Authorization: Bearer <key>
+      Body: {"model": ..., "messages": [{"role":"user","content":...}], ...}
+
+    Format response:
+      {"choices":[{"message":{"content":"..."},"finish_reason":...}]}
     """
+
+    provider_label: str = "OpenAI-compatible"
+    env_key_name: str = ""
+    config_section: str = ""
+    default_base_url: str = ""
+    default_model: str = "gpt-4o-mini"
 
     def __init__(self, cfg: dict[str, Any], logger: logging.Logger):
         self.cfg = cfg
         self.logger = logger
-        rcfg = cfg.get("runeria", {}) or {}
+        rcfg = cfg.get(self.config_section, {}) or {}
 
-        api_key = os.environ.get("RUNERIA_API_KEY") or str(rcfg.get("api_key", "")).strip()
+        api_key = os.environ.get(self.env_key_name) or str(rcfg.get("api_key", "")).strip()
         if not api_key:
             raise RuntimeError(
-                "RUNERIA_API_KEY belum diset. Set environment variable RUNERIA_API_KEY "
-                "atau isi runeria.api_key di config.yaml."
+                f"{self.env_key_name} belum diset. Set environment variable "
+                f"{self.env_key_name} atau isi {self.config_section}.api_key "
+                f"di config.yaml."
             )
         self.api_key = api_key
-        self.base_url = str(rcfg.get("base_url", "https://runeria.fun/v1")).rstrip("/")
+        self.base_url = str(rcfg.get("base_url", self.default_base_url)).rstrip("/")
 
-        self.translate_model_name = rcfg.get("model", "claude-sonnet-4")
+        self.translate_model_name = rcfg.get("model", self.default_model)
         self.glossary_model_name = rcfg.get("glossary_model", self.translate_model_name)
 
         self.temperature = float(rcfg.get("temperature", 0.3))
@@ -433,13 +449,28 @@ class RuneriaClient(LLMClient):
                 except Exception:
                     body_text = ""
                 snippet = body_text[:300]
+                # Fail-fast untuk error 4xx yang permanen (tidak akan pernah
+                # berhasil meskipun di-retry): 400 bad request, 401 auth, 403
+                # forbidden (mis. model butuh plan Pro), 404 model tidak ada.
+                # Pengecualian: 408 (request timeout) & 429 (rate limit) tetap
+                # di-retry. Selain itu (5xx, network), retry dengan backoff.
+                is_retryable_4xx = e.code in (408, 429)
+                is_permanent = 400 <= e.code < 500 and not is_retryable_4xx
+                if is_permanent:
+                    self.logger.error(
+                        "%s GAGAL (HTTP %d, permanen — tidak di-retry): %s",
+                        self.provider_label, e.code, snippet,
+                    )
+                    raise RuntimeError(
+                        f"{self.provider_label} HTTP {e.code} (permanen): {snippet}"
+                    ) from e
                 is_quota = e.code == 429 or "quota" in body_text.lower() or "rate" in body_text.lower()
                 delay = self.retry_base * (2 ** (attempt - 1))
                 if is_quota:
                     delay = max(delay, 30)
                 self.logger.warning(
-                    "Runeria gagal (attempt %d/%d): HTTP %d %s — retry dalam %.1fs",
-                    attempt, self.max_retries, e.code, snippet, delay,
+                    "%s gagal (attempt %d/%d): HTTP %d %s — retry dalam %.1fs",
+                    self.provider_label, attempt, self.max_retries, e.code, snippet, delay,
                 )
                 if attempt < self.max_retries:
                     time.sleep(delay)
@@ -447,15 +478,72 @@ class RuneriaClient(LLMClient):
                 last_err = e
                 delay = self.retry_base * (2 ** (attempt - 1))
                 self.logger.warning(
-                    "Runeria gagal (attempt %d/%d): %s — retry dalam %.1fs",
-                    attempt, self.max_retries, e, delay,
+                    "%s gagal (attempt %d/%d): %s — retry dalam %.1fs",
+                    self.provider_label, attempt, self.max_retries, e, delay,
                 )
                 if attempt < self.max_retries:
                     time.sleep(delay)
-        raise RuntimeError(f"Runeria gagal setelah {self.max_retries} percobaan: {last_err}")
+        raise RuntimeError(
+            f"{self.provider_label} gagal setelah {self.max_retries} percobaan: {last_err}"
+        )
 
 
-SUPPORTED_ENGINES = ("gemini", "runeria")
+class RuneriaClient(OpenAICompatibleClient):
+    """Runeria (https://runeria.fun) — OpenAI-compatible.
+
+    Plan basic mendukung: claude-sonnet-4, claude-haiku-4.5.
+    Plan Pro/Enterprise: deepseek-3.2 dst (basic plan akan dapat HTTP 403).
+    """
+
+    provider_label = "Runeria"
+    env_key_name = "RUNERIA_API_KEY"
+    config_section = "runeria"
+    default_base_url = "https://runeria.fun/v1"
+    default_model = "claude-sonnet-4"
+
+
+class ClineClient(OpenAICompatibleClient):
+    """Cline (https://app.cline.bot) — OpenAI-compatible.
+
+    Endpoint: https://api.cline.bot/api/v1/chat/completions
+    Models tersedia: moonshotai/kimi-k2.6, minimax/minimax-m2.5,
+                     kwaipilot/kat-coder-pro, z-ai/glm-5.
+    """
+
+    provider_label = "Cline"
+    env_key_name = "CLINE_API_KEY"
+    config_section = "cline"
+    default_base_url = "https://api.cline.bot/api/v1"
+    default_model = "moonshotai/kimi-k2.6"
+
+
+SUPPORTED_ENGINES = ("gemini", "runeria", "cline")
+
+# Daftar model yang direkomendasikan per-engine (dipakai menu interaktif &
+# untuk validasi ringan). Ini bukan whitelist — user bebas isi model lain
+# di config.yaml.
+ENGINE_MODELS: dict[str, list[str]] = {
+    "gemini": [
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-pro",
+    ],
+    "runeria": [
+        "claude-sonnet-4",      # basic plan (rekomendasi)
+        "claude-haiku-4.5",     # basic plan (lebih cepat & murah, sedikit di bawah sonnet)
+        "deepseek-3.2",         # PRO plan only
+        "minimax-m2.5",         # cek plan
+        "minimax-m2.1",         # cek plan
+        "glm-5",                # cek plan
+        "qwen3-coder-next",     # SKIP (coder model)
+    ],
+    "cline": [
+        "moonshotai/kimi-k2.6",     # rekomendasi default
+        "minimax/minimax-m2.5",
+        "z-ai/glm-5",
+        "kwaipilot/kat-coder-pro",  # SKIP (coder model)
+    ],
+}
 
 
 def create_llm_client(
@@ -469,6 +557,8 @@ def create_llm_client(
         return GeminiClient(cfg, logger)
     if engine == "runeria":
         return RuneriaClient(cfg, logger)
+    if engine == "cline":
+        return ClineClient(cfg, logger)
     raise ValueError(
         f"Engine '{engine}' tidak dikenal. Pilih: {', '.join(SUPPORTED_ENGINES)}."
     )
@@ -1023,6 +1113,350 @@ def _auto_update_glossary(
         logger.info("Auto-update glossary: tidak ada entry baru.")
 
 
+# ============================================================
+# Interactive menu mode
+# ============================================================
+#
+# Tujuan: bikin tool dipakai tanpa harus hafal flag CLI. Jalanin
+# `python translate.py` tanpa argumen apa pun -> muncul menu.
+# Semua action delegate ke fungsi cmd_* yang sudah ada (sehingga CLI
+# & menu tidak duplikat logika).
+
+def _menu_print(text: str = "") -> None:
+    print(text)
+
+
+def _menu_input(prompt: str, default: str | None = None) -> str:
+    """Wrapper input() dengan support default. Ctrl-C / Ctrl-D return string kosong."""
+    try:
+        full_prompt = f"{prompt} [{default}]: " if default else f"{prompt}: "
+        ans = input(full_prompt).strip()
+        return ans or (default or "")
+    except (EOFError, KeyboardInterrupt):
+        return ""
+
+
+def _menu_list_novels() -> list[Path]:
+    if not NOVELS_DIR.exists():
+        return []
+    return sorted([d for d in NOVELS_DIR.iterdir() if d.is_dir() and (d / "source").exists()])
+
+
+def _menu_pick_novel() -> str | None:
+    """Tampilkan list novel, return nama (string) yang dipilih atau None."""
+    novels = _menu_list_novels()
+    if not novels:
+        _menu_print("  (belum ada novel — buat folder novels/<nama>/source/ dulu)")
+        return None
+    _menu_print()
+    for i, d in enumerate(novels, 1):
+        n = len(list((d / "source").glob("*.txt")))
+        t_dir = d / "translated"
+        t = len(list(t_dir.glob("*.txt"))) if t_dir.exists() else 0
+        gloss = "yes" if (d / "glossary.json").exists() else "no "
+        _menu_print(f"  {i:2d}. {d.name:30s}  source={n:4d}  translated={t:4d}  glossary={gloss}")
+    _menu_print(f"   0. (batal)")
+    raw = _menu_input("Pilih novel (nomor)")
+    if not raw or raw == "0":
+        return None
+    try:
+        idx = int(raw)
+        if 1 <= idx <= len(novels):
+            return novels[idx - 1].name
+    except ValueError:
+        pass
+    _menu_print("  Pilihan tidak valid.")
+    return None
+
+
+def _menu_engine_label(cfg: dict[str, Any]) -> str:
+    engine = str(cfg.get("engine") or "gemini").lower().strip()
+    section_cfg = cfg.get(engine, {}) or {}
+    if engine == "gemini":
+        model = section_cfg.get("model") or "gemini-2.5-flash"
+    else:
+        model = section_cfg.get("model") or ENGINE_MODELS.get(engine, ["?"])[0]
+    return f"engine={engine}  model={model}"
+
+
+def _patch_config_top_level(path: Path, key: str, value: str) -> bool:
+    """Replace top-level `key: ...` line in YAML, preserve comments. Return True if patched."""
+    if not path.exists():
+        return False
+    lines = path.read_text(encoding="utf-8").splitlines()
+    pattern = re.compile(rf"^{re.escape(key)}\s*:\s*")
+    for i, line in enumerate(lines):
+        # Top-level = no leading whitespace, line not a comment.
+        if line.startswith((" ", "\t")) or line.lstrip().startswith("#"):
+            continue
+        if pattern.match(line):
+            lines[i] = f'{key}: "{value}"'
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            return True
+    return False
+
+
+def _patch_config_nested(path: Path, section: str, key: str, value: str) -> bool:
+    """Replace `<key>: ...` line inside `<section>:` block. Preserve comments."""
+    if not path.exists():
+        return False
+    lines = path.read_text(encoding="utf-8").splitlines()
+    section_re = re.compile(rf"^{re.escape(section)}\s*:\s*$")
+    key_re = re.compile(rf"^(\s+){re.escape(key)}\s*:\s*")
+    in_section = False
+    for i, line in enumerate(lines):
+        if section_re.match(line):
+            in_section = True
+            continue
+        if in_section:
+            # Akhir block: ketemu top-level key lain (no indent, bukan comment/blank).
+            stripped = line.lstrip()
+            if line and not line.startswith((" ", "\t")) and stripped and not stripped.startswith("#"):
+                in_section = False
+                continue
+            m = key_re.match(line)
+            if m:
+                lines[i] = f'{m.group(1)}{key}: "{value}"'
+                path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                return True
+    return False
+
+
+def _menu_switch_engine() -> bool:
+    """Sub-menu ganti engine & model. Return True kalau ada perubahan disimpan permanen."""
+    _menu_print()
+    _menu_print("--- Ganti engine & model ---")
+    engines = list(SUPPORTED_ENGINES)
+    for i, e in enumerate(engines, 1):
+        _menu_print(f"  {i}. {e}")
+    _menu_print(f"  0. (batal)")
+    raw = _menu_input("Pilih engine")
+    if not raw or raw == "0":
+        return False
+    try:
+        engine = engines[int(raw) - 1]
+    except (ValueError, IndexError):
+        _menu_print("  Pilihan tidak valid.")
+        return False
+
+    models = ENGINE_MODELS.get(engine, [])
+    _menu_print()
+    _menu_print(f"Model untuk {engine}:")
+    for i, m in enumerate(models, 1):
+        _menu_print(f"  {i:2d}. {m}")
+    _menu_print(f"   c. (custom — ketik nama model sendiri)")
+    _menu_print(f"   0. (batal)")
+    raw = _menu_input("Pilih model")
+    if not raw or raw == "0":
+        return False
+    if raw.lower() == "c":
+        model = _menu_input("Nama model")
+        if not model:
+            return False
+    else:
+        try:
+            model = models[int(raw) - 1]
+        except (ValueError, IndexError):
+            _menu_print("  Pilihan tidak valid.")
+            return False
+
+    _menu_print()
+    _menu_print(f"Pilihan: engine={engine}, model={model}")
+    save = _menu_input("Simpan permanen ke config.yaml? (y/N)", default="N").lower()
+    if save in ("y", "yes"):
+        ok1 = _patch_config_top_level(CONFIG_PATH, "engine", engine)
+        ok2 = _patch_config_nested(CONFIG_PATH, engine, "model", model)
+        ok3 = _patch_config_nested(CONFIG_PATH, engine, "glossary_model", model)
+        if ok1 and ok2:
+            _menu_print(f"  Disimpan ke {CONFIG_PATH}.")
+            if not ok3:
+                _menu_print(f"  (catatan: glossary_model di section {engine} tidak ditemukan, dilewati)")
+            return True
+        _menu_print("  Gagal patch config.yaml — edit manual:")
+        _menu_print(f"    engine: \"{engine}\"")
+        _menu_print(f"    {engine}.model: \"{model}\"")
+        return False
+    _menu_print("  Tidak disimpan. (Untuk run sekali pakai, gunakan --engine ... --model lewat config sendiri.)")
+    return False
+
+
+def _menu_translate_flow(parser: "argparse.ArgumentParser") -> int:
+    novel = _menu_pick_novel()
+    if not novel:
+        return 0
+    rng = _menu_input("Range chapter (mis. '1-10' atau '1,3,5'; kosong=semua)")
+    rebuild = _menu_input("Timpa hasil yang sudah ada? (y/N)", default="N").lower() in ("y", "yes")
+    engine_override = ""
+    if _menu_input("Override engine untuk run ini? (y/N)", default="N").lower() in ("y", "yes"):
+        for i, e in enumerate(SUPPORTED_ENGINES, 1):
+            _menu_print(f"  {i}. {e}")
+        raw = _menu_input("Pilih engine")
+        try:
+            engine_override = SUPPORTED_ENGINES[int(raw) - 1]
+        except (ValueError, IndexError):
+            engine_override = ""
+    argv = ["--novel", novel]
+    if rng:
+        argv += ["--only", rng]
+    if rebuild:
+        argv += ["--rebuild"]
+    if engine_override:
+        argv += ["--engine", engine_override]
+    _menu_print(f"\n>> python translate.py {' '.join(argv)}")
+    args = parser.parse_args(argv)
+    return cmd_translate(args)
+
+
+def _menu_glossary_flow(parser: "argparse.ArgumentParser") -> int:
+    novel = _menu_pick_novel()
+    if not novel:
+        return 0
+    while True:
+        _menu_print()
+        _menu_print(f"--- Glossary: {novel} ---")
+        _menu_print("  1. List semua entry")
+        _menu_print("  2. Add entry")
+        _menu_print("  3. Edit entry")
+        _menu_print("  4. Remove entry")
+        _menu_print("  5. Set style notes")
+        _menu_print("  0. Kembali")
+        raw = _menu_input("Pilih")
+        if not raw or raw == "0":
+            return 0
+        argv = ["--novel", novel]
+        if raw == "1":
+            argv += ["--glossary-list"]
+        elif raw in ("2", "3"):
+            t = _menu_input("Tipe (character | place | term)", default="character")
+            src = _menu_input("Source (mis. 'Yukine')")
+            tgt = _menu_input("Target (mis. 'Yukino')")
+            if not (t and src and tgt):
+                _menu_print("  Input tidak lengkap, batal.")
+                continue
+            argv += [
+                "--glossary-add" if raw == "2" else "--glossary-edit",
+                t, src, tgt,
+            ]
+        elif raw == "4":
+            t = _menu_input("Tipe (character | place | term)", default="character")
+            src = _menu_input("Source")
+            if not (t and src):
+                continue
+            argv += ["--glossary-remove", t, src]
+        elif raw == "5":
+            note = _menu_input("Style notes (kosong = hapus)")
+            argv += ["--glossary-set-style", note]
+        else:
+            _menu_print("  Pilihan tidak valid.")
+            continue
+        try:
+            args = parser.parse_args(argv)
+            cmd_glossary(args)
+        except SystemExit:
+            pass
+        except (RuntimeError, ValueError, FileNotFoundError) as e:
+            _menu_print(f"  ERROR: {e}")
+
+
+def _menu_dry_run_flow(parser: "argparse.ArgumentParser") -> int:
+    novel = _menu_pick_novel()
+    if not novel:
+        return 0
+    args = parser.parse_args(["--novel", novel, "--dry-run-filter"])
+    return cmd_translate(args)
+
+
+def _menu_build_glossary_flow(parser: "argparse.ArgumentParser") -> int:
+    novel = _menu_pick_novel()
+    if not novel:
+        return 0
+    args = parser.parse_args(["--novel", novel, "--build-glossary"])
+    return cmd_translate(args)
+
+
+def _menu_help() -> None:
+    _menu_print()
+    _menu_print("=== Cheatsheet command CLI ===")
+    _menu_print()
+    _menu_print("# List semua novel")
+    _menu_print("python translate.py --list")
+    _menu_print()
+    _menu_print("# Translate novel (auto-detect bahasa, default engine dari config)")
+    _menu_print("python translate.py --novel <nama>")
+    _menu_print("python translate.py --novel <nama> --only 1-10")
+    _menu_print("python translate.py --novel <nama> --only 1,3,5-8")
+    _menu_print("python translate.py --novel <nama> --rebuild   # timpa hasil lama")
+    _menu_print()
+    _menu_print("# Override engine sekali pakai")
+    _menu_print("python translate.py --novel <nama> --engine runeria")
+    _menu_print("python translate.py --novel <nama> --engine cline")
+    _menu_print()
+    _menu_print("# Glossary editor (offline, tanpa API key)")
+    _menu_print("python translate.py --novel <nama> --glossary-list")
+    _menu_print("python translate.py --novel <nama> --glossary-add character Yukine Yukino")
+    _menu_print("python translate.py --novel <nama> --glossary-edit character Yukine Yuki")
+    _menu_print("python translate.py --novel <nama> --glossary-remove character Yukine")
+    _menu_print("python translate.py --novel <nama> --glossary-set-style \"Pakai honorifik JP.\"")
+    _menu_print()
+    _menu_print("# Build glossary saja, tidak translate")
+    _menu_print("python translate.py --novel <nama> --build-glossary")
+    _menu_print()
+    _menu_print("# Preview baris yang akan dihapus filter (tanpa API call, tanpa translate)")
+    _menu_print("python translate.py --novel <nama> --dry-run-filter")
+    _menu_print()
+    _menu_print("# Menu interaktif (yang sekarang sedang kamu jalankan)")
+    _menu_print("python translate.py --menu     # atau jalan tanpa argumen apa pun")
+    _menu_print()
+
+
+def cmd_menu(parser: "argparse.ArgumentParser") -> int:
+    """Loop menu interaktif. Tiap action delegate ke cmd_translate / cmd_glossary."""
+    while True:
+        try:
+            cfg = load_config()
+        except Exception as e:  # noqa: BLE001
+            cfg = {}
+            _menu_print(f"(peringatan: gagal load config.yaml: {e})")
+        _menu_print()
+        _menu_print("======================================")
+        _menu_print(" Novel Translator — menu interaktif")
+        _menu_print(f" {_menu_engine_label(cfg)}")
+        _menu_print("======================================")
+        _menu_print("  1. List semua novel & status")
+        _menu_print("  2. Translate novel")
+        _menu_print("  3. Edit glossary")
+        _menu_print("  4. Ganti engine & model")
+        _menu_print("  5. Build glossary saja (tanpa translate)")
+        _menu_print("  6. Dry-run filter (preview baris yang dihapus)")
+        _menu_print("  7. Cheatsheet command CLI")
+        _menu_print("  0. Keluar")
+        _menu_print()
+        raw = _menu_input("Pilih")
+        if not raw or raw == "0":
+            return 0
+        try:
+            if raw == "1":
+                cmd_list(parser.parse_args([]))
+            elif raw == "2":
+                _menu_translate_flow(parser)
+            elif raw == "3":
+                _menu_glossary_flow(parser)
+            elif raw == "4":
+                _menu_switch_engine()
+            elif raw == "5":
+                _menu_build_glossary_flow(parser)
+            elif raw == "6":
+                _menu_dry_run_flow(parser)
+            elif raw == "7":
+                _menu_help()
+            else:
+                _menu_print("  Pilihan tidak valid.")
+        except (RuntimeError, ValueError, FileNotFoundError) as e:
+            _menu_print(f"\nERROR: {e}\n")
+        except KeyboardInterrupt:
+            _menu_print("\n(dihentikan, kembali ke menu)")
+
+
 def build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="translate.py",
@@ -1047,6 +1481,8 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run-filter", action="store_true",
                    help="Tampilkan baris source yang AKAN dihapus filter (tanpa menerjemahkan)")
     p.add_argument("--list", action="store_true", help="Daftar novel yang terdeteksi & statusnya")
+    p.add_argument("--menu", action="store_true",
+                   help="Jalankan menu interaktif (atau jalan tanpa argumen apa pun)")
 
     # ----- Glossary editor (offline, tidak butuh API key) -----
     g = p.add_argument_group(
@@ -1202,12 +1638,19 @@ def _has_glossary_flags(args: argparse.Namespace) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_argparser().parse_args(argv)
+    parser = build_argparser()
+    # Tanpa argumen apa pun -> menu interaktif (paling user-friendly).
+    real_argv = sys.argv[1:] if argv is None else argv
+    if not real_argv:
+        return cmd_menu(parser)
+    args = parser.parse_args(argv)
+    if getattr(args, "menu", False):
+        return cmd_menu(parser)
 
     if args.list or args.cmd == "list":
         return cmd_list(args)
     if not args.novel:
-        print("ERROR: --novel <nama> wajib diisi (atau pakai --list).", file=sys.stderr)
+        print("ERROR: --novel <nama> wajib diisi (atau pakai --list / --menu).", file=sys.stderr)
         return 1
     try:
         # Glossary editor (offline, tidak butuh API key) di-handle duluan.
