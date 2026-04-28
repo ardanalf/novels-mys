@@ -319,22 +319,26 @@ class FilterEngine:
             if cats_cfg.get(cat, default_on):
                 enabled.append(cat)
 
+        # Custom patterns di-anchor ke seluruh BARIS (sesuai dokumentasi di
+        # config.yaml). Pakai _line() — bukan re.compile().match — supaya
+        # pola seperti `translated` tidak menghapus baris yang kebetulan
+        # diawali kata itu (mis. "translated version of the story...").
         custom: list[Matcher] = []
         for pat_str in (cfg_filters.get("custom_patterns") or []):
             try:
-                custom.append(re.compile(pat_str, re.IGNORECASE).match)
+                custom.append(_line(pat_str))
             except re.error:
                 # Kalau regex invalid, skip diam-diam (akan log di translate.py)
                 pass
 
-        # Per-novel filters file
+        # Per-novel filters file (1 regex per baris, # untuk komentar).
         if custom_patterns_path and custom_patterns_path.exists():
             for raw in custom_patterns_path.read_text(encoding="utf-8").splitlines():
                 line = raw.strip()
                 if not line or line.startswith("#"):
                     continue
                 try:
-                    custom.append(re.compile(line, re.IGNORECASE).match)
+                    custom.append(_line(line))
                 except re.error:
                     pass
 
@@ -420,7 +424,7 @@ def clean_text(
     custom_compiled: list[Matcher] = []
     for pat_str in (custom_patterns or []):
         try:
-            custom_compiled.append(re.compile(pat_str, re.IGNORECASE).match)
+            custom_compiled.append(_line(pat_str))
         except re.error:
             pass
     engine = FilterEngine(enabled=enabled, custom_patterns=custom_compiled)
